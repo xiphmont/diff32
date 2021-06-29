@@ -356,110 +356,121 @@ function print_end(){
     printf "\n ----------- END ----------- \n"
 }
 
-function printe(string){
-    print string | "cat 1>&2"
+function out(string){
+    if (use_stderr) {
+        print string | "cat 1>&2"
+    } else {
+        print string
+    }
+}
+
+function stdout_usage(){
+    save_stderr = use_stderr
+    use_stderr = err
+    usage()
+    use_stderr = save_stderr
 }
 
 function usage(){
-    print ""
-    print "diff32 : A 'diff'-style comparison tool for raw 32 bit binaries"
-    print ""
-    print "USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin"
-    print ""
-    print "OPTIONS:"
-    print ""
-    print "  -c, --context=NUM"
-    print ""
-    print "     Include NUM lines of copied context before and after changes."
-    print "     Minimum value is 0, maximum is 16.  Default is 3."
-    print ""
-    print "  -d, --minimal"
-    print ""
-    print "     Try hard to find a smaller set of changes."
-    print ""
-    print "  -e, --embargo-deletion"
-    print ""
-    print "     Emit deletions as placeholders indicating the number of words"
-    print "     omitted from fileA. Emit line changes (ie, ! lines) with words"
-    print "     from fileA obscured. Context is set to zero, but may be over-"
-    print "     ridden by following with -c LINES.  Embargo is intended to"
-    print "     minimize the amount of fileA included in output."
-    print ""
-    print "  -f, --fuzzy=NUM"
-    print ""
-    print "     Adjust the matching threshold that diff32 uses to present two"
-    print "     regions as overlapping/similar using '!', instead of deletions"
-    print "     '<' followed by insertions '>'. Fuzzy matching is nonlinear, but"
-    print "     the value roughly sets the minimum sequence of matching bits to"
-    print "     consider two words a loose match.  Note that single-line"
-    print "     changes are always presented as '!' regardless of match."
-    print "     Minimum value is 0, max is 32. Default is 16 (two 8-bit bytes)."
-    print ""
-    print "  -h, --help"
-    print ""
-    print "     Print this help message and exit."
-    print ""
-    print "  -m, --map=DESTINATION[,SOURCE[,LENGTH]]"
-    print ""
-    print "     Map displayed input byte range of LENGTH bytes starting at"
-    print "     SOURCE byte offset to the range beginning at DESTINATION.  -m"
-    print "     only affects displayed addresses, not match or output order."
-    print "     Omitting LENGTH extends range to the end of the file.  Omitting"
-    print "     both SOURCE and LENGTH maps the entire input. More than one"
-    print "     range may be specified. Later overlapping input ranges override"
-    print "     earlier ranges. Final destination ranges may not overlap. Values"
-    print "     may be decimal, octal (leading 0) or hexadecimal (leading 0x)."
-    print ""
-    print "  -n, --no-fuzzy"
-    print ""
-    print "     Do not perform 'fuzzy' overlap matching.  Presents output"
-    print "     as deletions ('<') followed by insertions ('>') only, with no"
-    print "     change ('!') lines (including no single-line changes)."
-    print ""
-    print "  -s, --swap-endian"
-    print ""
-    print "     diff32 normally presents bytes in as-read order. -s instructs"
-    print "     diff32 to swap the order it prints bytes on each line. -s has"
-    print "     no effect on matching as matching is endian-agnostic."
-    print ""
-    print "  -v, --version"
-    print ""
-    print "     Print version and exit."
-    print ""
-    print "  --color"
-    print ""
-    print "     Colorize the output."
-    print ""
-    print "DETAILS:"
-    print ""
-    print "     diff32 is an awk script wrapping the od and diff utilities"
-    print "     that produces a human-readable side-by-side text summary of"
-    print "     differences between two raw 32-bit binary files."
-    print ""
-    print "     diff32 searches for insertions, deletions, and co-located"
-    print "     changes. By default, it will also perform fuzzy matching to"
-    print "     align regions of similar content."
-    print ""
-    print "EXAMPLE:"
-    print ""
-    print "  diff32 -d --color mips_binary1.bin mips_binary2.bin | less -R"
-    print ""
-    print "     Produce a colorized summary of the differences in binary files"
-    print "     mips_binary1.bin and mips_binary2.bin, presented on the terminal"
-    print "     one page at a time using the 'less' utility. The -d option to"
-    print "     diff32 requests extra time be spent to minimize the change"
-    print "     set. The -R option instructs less to allow ANSI color codes."
-    print ""
-    print "AUTHOR:"
-    print ""
-    print "     Written by Monty Montgomery <monty@xiph.org>"
-    print "     This is free software: you are free to change and redistribute"
-    print "     it.  There is NO WARRANTY, to the extent permitted by law."
-    print ""
-    print "SEE ALSO:"
-    print ""
-    print "  od(1), diff(1), cmp(1), xdelta(1)"
-    print ""
+    out("")
+    out("diff32 : A 'diff'-style comparison tool for raw 32 bit binaries")
+    out("")
+    out("USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin")
+    out("")
+    out("OPTIONS:")
+    out("")
+    out("  -c, --context=NUM")
+    out("")
+    out("     Include NUM lines of copied context before and after changes.")
+    out("     Minimum value is 0, maximum is 16.  Default is 3.")
+    out("")
+    out("  -d, --minimal")
+    out("")
+    out("     Try hard to find a smaller set of changes.")
+    out("")
+    out("  -e, --embargo-deletion")
+    out("")
+    out("     Emit deletions as placeholders indicating the number of words")
+    out("     omitted from fileA. Emit line changes (ie, ! lines) with words")
+    out("     from fileA obscured. Context is set to zero, but may be over-")
+    out("     ridden by following with -c LINES.  Embargo is intended to")
+    out("     minimize the amount of fileA included in output.")
+    out("")
+    out("  -f, --fuzzy=NUM")
+    out("")
+    out("     Adjust the matching threshold that diff32 uses to present two")
+    out("     regions as overlapping/similar using '!', instead of deletions")
+    out("     '<' followed by insertions '>'. Fuzzy matching is nonlinear, but")
+    out("     the value roughly sets the minimum sequence of matching bits to")
+    out("     consider two words a loose match.  Note that single-line")
+    out("     changes are always presented as '!' regardless of match.")
+    out("     Minimum value is 0, max is 32. Default is 16 (two 8-bit bytes).")
+    out("")
+    out("  -h, --help")
+    out("")
+    out("     Out(this help message and exit.")
+    out("")
+    out("  -m, --map=DESTINATION[,SOURCE[,LENGTH]]")
+    out("")
+    out("     Map displayed input byte range of LENGTH bytes starting at")
+    out("     SOURCE byte offset to the range beginning at DESTINATION.  -m")
+    out("     only affects displayed addresses, not match or output order.")
+    out("     Omitting LENGTH extends range to the end of the file.  Omitting")
+    out("     both SOURCE and LENGTH maps the entire input. More than one")
+    out("     range may be specified. Later overlapping input ranges override")
+    out("     earlier ranges. Final destination ranges may not overlap. Values")
+    out("     may be decimal, octal (leading 0) or hexadecimal (leading 0x).")
+    out("")
+    out("  -n, --no-fuzzy")
+    out("")
+    out("     Do not perform 'fuzzy' overlap matching.  Presents output")
+    out("     as deletions ('<') followed by insertions ('>') only, with no")
+    out("     change ('!') lines (including no single-line changes).")
+    out("")
+    out("  -s, --swap-endian")
+    out("")
+    out("     diff32 normally presents bytes in as-read order. -s instructs")
+    out("     diff32 to swap the order it prints bytes on each line. -s has")
+    out("     no effect on matching as matching is endian-agnostic.")
+    out("")
+    out("  -v, --version")
+    out("")
+    out("     Out(version and exit.")
+    out("")
+    out("  --color")
+    out("")
+    out("     Colorize the output.")
+    out("")
+    out("DETAILS:")
+    out("")
+    out("     diff32 is an awk script wrapping the od and diff utilities")
+    out("     that produces a human-readable side-by-side text summary of")
+    out("     differences between two raw 32-bit binary files.")
+    out("")
+    out("     diff32 searches for insertions, deletions, and co-located")
+    out("     changes. By default, it will also perform fuzzy matching to")
+    out("     align regions of similar content.")
+    out("")
+    out("EXAMPLE:")
+    out("")
+    out("  diff32 -d --color mips_binary1.bin mips_binary2.bin | less -R")
+    out("")
+    out("     Produce a colorized summary of the differences in binary files")
+    out("     mips_binary1.bin and mips_binary2.bin, presented on the terminal")
+    out("     one page at a time using the 'less' utility. The -d option to")
+    out("     diff32 requests extra time be spent to minimize the change")
+    out("     set. The -R option instructs less to allow ANSI color codes.")
+    out("")
+    out("AUTHOR:")
+    out("")
+    out("     Written by Monty Montgomery <monty@xiph.org>")
+    out("     This is free software: you are free to change and redistribute")
+    out("     it.  There is NO WARRANTY, to the extent permitted by law.")
+    out("")
+    out("SEE ALSO:")
+    out("")
+    out("  od(1), diff(1), cmp(1), xdelta(1)")
+    out("")
 }
 
 function version () {
@@ -674,7 +685,7 @@ function getopts(argc, argv,
                         exit(1)
                     }
                 } else if (option == "h" || option == "help") {
-                    usage()
+                    stdout_usage()
                     exit(0)
                 } else if (option == "m" || option == "map") {
                     if (argument[1] == "" || argument[4] != "") {
@@ -746,6 +757,7 @@ BEGIN {
     near_beginning=1
     weighted_fuzzy=0
     address_maps=0
+    use_stderr=1
 
     getopts(ARGC, ARGV)
 
