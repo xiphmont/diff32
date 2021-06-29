@@ -474,6 +474,8 @@ function usage(){
 }
 
 function version () {
+    save_stderr = use_stderr
+    use_stderr = err
     print ""
     print "diff32 version 0.0.2"
     if ("awk --version" | getline) {
@@ -486,6 +488,7 @@ function version () {
         print $0
     }
     print ""
+    use_stderr = save_stderr
 }
 
 function list_map_error(i, j,
