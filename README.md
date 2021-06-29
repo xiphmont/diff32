@@ -14,6 +14,14 @@ OPTIONS:
 
      Try hard to find a smaller set of changes.
 
+  -e, --embargo-deletion
+
+     Emit deletions as placeholders indicating the number of words
+     omitted from fileA.  Emit line changes (ie, ! lines) with words
+     from fileA obscured.  Context is set to zero, but may be over-
+     ridden by following with -c NUM.  Embargo is intended to
+     minimize the amount of fileA included in output.
+
   -f, --fuzzy=NUM
 
      Adjust the matching threshold that diff32 uses to present two
