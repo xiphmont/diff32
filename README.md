@@ -28,7 +28,18 @@ OPTIONS:
 
      Print this help messae and exit.
 
-  -n, --no-fuzzy
+  -m, --map=DESTINATION[,SOURCE[,LENGTH]]
+
+     Map displayed input byte range of LENGTH bytes starting at
+     SOURCE byte offset to the range beginning at DESTINATION.  -m
+     only affects displayed addresses, not match or output order.
+     Omitting LENGTH extends range to the end of the file.  Omitting
+     both SOURCE and LENGTH maps the entire input. More than one"
+     range may be specified. Later overlapping input ranges override
+     earlier ranges. Final destination ranges may not overlap. Values
+     may be decimal, octal (leading 0) or hexadecimal (leading 0x).
+
+-n, --no-fuzzy
 
      Do not perform 'fuzzy' overlap matching.  Presents output
      as deletions ('<') followed by insertions ('>') only, with no

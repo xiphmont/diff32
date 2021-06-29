@@ -32,26 +32,61 @@ function print_highlight(to_print, to_compare, off, on, lock,
     if (current != off) printf off
 }
 
+function map_an_address(addr,
+                        i){
+    for (i=0; i<address_maps; i++) {
+        if (address_map_src[i] <= addr) {
+            addr = address_map_dst[i] + addr - address_map_src[i]
+            break
+        }
+    }
+    return addr
+}
+
 # print an address header at the beginning of a new block of differences.
 function print_address(old, new,
-                       old_addr, new_addr){
-    printf " "color_address_base
-    old_addr = sprintf("0x%08x",old)
-    new_addr = sprintf("0x%08x",new)
-    print_highlight(old_addr,new_addr,color_address_base,color_address_old,1);
-    if(color_address_base){
-        printf "       "
-    }else{
-        printf " ----- "
+                       old_str, new_str, old_map, new_map, bar, base, diff){
+
+    # mapping is purely a cosmetic addition, so it's handled on-demand here
+    old_map = map_an_address(old)
+    new_map = map_an_address(new)
+    old_str = sprintf("0x%08x",old)
+    new_str = sprintf("0x%08x",new)
+
+    bar = " "
+    if (old == old_map && new == new_map){
+        if(!color_address_base) bar = "_"
+        base = color_address_base
+        diff = color_address_diff
+    } else {
+        base = color_unchanged
+        diff = color_unchanged
     }
-    print_highlight(new_addr,old_addr,color_address_base,color_address_new,1);
-    printf color_off"\n"
+    printf bar""base
+    print_highlight(old_str,new_str,base,diff,1);
+    printf bar""bar""bar""bar""bar""bar""bar
+    print_highlight(new_str,old_str,base,diff,1);
+    printf color_off""bar"\n"
+
+    if (old != old_map || new != new_map){
+        old_str = sprintf("0x%08x",old_map)
+        new_str = sprintf("0x%08x",new_map)
+        base = color_address_base
+        diff = color_address_diff
+        if(!color_address_base) bar = "_"
+
+        printf "["base
+        print_highlight(old_str,new_str,base,diff,1);
+        printf bar""bar"MAP"bar""bar
+        print_highlight(new_str,old_str,base,diff,1);
+        printf color_off"]\n"
+    }
 }
 
 # print one line of a diff block
 function print_line(old, c, new) {
     if(c == " "){
-        printf color_bytes_unchanged" %s  %s  %s"color_off, old, c, new
+        printf color_unchanged" %s  %s  %s"color_off, old, c, new
     }else{
         printf " "
         print_highlight(old,new,color_off,color_bytes_old,0);
@@ -256,12 +291,12 @@ function print_stored_diff(                                     \
     old_start = old_cursor - old_count*4;
     new_start = new_cursor - new_count*4;
 
-    if (context_count >= context || beginning) {
+    if (context_count >= context || near_beginning) {
         # post-context has run out, or we're at/near beginning of file.
         # Skip a line for visual break and print an address header.
-        if (!beginning) printf "\n"
+        if (!near_beginning) printf "\n"
         print_address(old_start, new_start)
-        beginning=0
+        near_beginning=0
     }
     # print any pending pre-context
     for(i=context_count;i>0;i--) {
@@ -310,11 +345,15 @@ function print_end(){
     printf "\n ----------- END ----------- \n"
 }
 
+function printe(string){
+    print string | "cat 1>&2"
+}
+
 function usage(){
     print ""
     print "diff32 : A 'diff'-style comparison tool for raw 32 bit binaries"
     print ""
-    print "USAGE  : diff32 [OPTIONS] file1.bin file2.bin"
+    print "USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin"
     print ""
     print "OPTIONS:"
     print ""
@@ -339,19 +378,30 @@ function usage(){
     print ""
     print "  -h, --help"
     print ""
-    print "     Print this help messae and exit."
+    print "     Print this help message and exit."
+    print ""
+    print "  -m, --map=DESTINATION[,SOURCE[,LENGTH]]"
+    print ""
+    print "     Map displayed input byte range of LENGTH bytes starting at"
+    print "     SOURCE byte offset to the range beginning at DESTINATION.  -m"
+    print "     only affects displayed addresses, not match or output order."
+    print "     Omitting LENGTH extends range to the end of the file.  Omitting"
+    print "     both SOURCE and LENGTH maps the entire input. More than one"
+    print "     range may be specified. Later overlapping input ranges override"
+    print "     earlier ranges. Final destination ranges may not overlap. Values"
+    print "     may be decimal, octal (leading 0) or hexadecimal (leading 0x)."
     print ""
     print "  -n, --no-fuzzy"
     print ""
     print "     Do not perform 'fuzzy' overlap matching.  Presents output"
     print "     as deletions ('<') followed by insertions ('>') only, with no"
-    print "     change ('!') lines."
+    print "     change ('!') lines (including no single-line changes)."
     print ""
     print "  -s, --swap-endian"
     print ""
     print "     diff32 normally presents bytes in as-read order. -s instructs"
     print "     diff32 to swap the order it prints bytes on each line. -s has"
-    print "     no effect on matching, which is endian-agnostic."
+    print "     no effect on matching as matching is endian-agnostic."
     print ""
     print "  -v, --version"
     print ""
@@ -376,7 +426,7 @@ function usage(){
     print "  diff32 -d --color mips_binary1.bin mips_binary2.bin | less -R"
     print ""
     print "     Produce a colorized summary of the differences in binary files"
-    print "     mips_binar1.bin and mips_binary2.bin, presented on the terminal"
+    print "     mips_binary1.bin and mips_binary2.bin, presented on the terminal"
     print "     one page at a time using the 'less' utility. The -d option to"
     print "     diff32 requests extra time be spent to minimize the change"
     print "     set. The -R option instructs less to allow ANSI color codes."
@@ -395,7 +445,7 @@ function usage(){
 
 function version () {
     print ""
-    print "diff32 version 0.0.0"
+    print "diff32 version 0.0.1"
     if ("awk --version" | getline) {
         print $0
     }
@@ -408,12 +458,143 @@ function version () {
     print ""
 }
 
+function list_map_error(i, j,
+                        k, str){
+    printe("       Requested mapping ranges:")
+    for(k=0; k < address_maps; k++) {
+        if (k+1 < address_maps) {
+            str = sprintf("       %d) src: [0x%08x..0x%08x) -> "        \
+                          "dst [0x%08x..0x%08x)",k,
+                          address_map_src[k],
+                          address_map_src[k+1],
+                          address_map_dst[k],
+                          address_map_dst[k] +                          \
+                          address_map_src[k+1] - address_map_src[k])
+        } else {
+            str = sprintf("       %d) src: [0x%08x..   EOF    ] -> "    \
+                          "dst [0x%08x..   EOF    ]",k,
+                          address_map_src[k],
+                          address_map_dst[k])
+        }
+        if (k==i || k==j) {
+            str=str" <<<"
+        }
+        printe(str)
+    }
+    printe("")
+}
+
+function sanity_check_maps(                                             \
+                           i, j, k, lenA, startA, endA, len, start, end){
+    for (i=0; i < address_maps-1; i++) {
+        lenA = address_map_src[i+1] - address_map_src[i]
+        startA = address_map_dst[i]
+        endA   = address_map_dst[i] + lenA
+        for (j=i+1; j < address_maps; j++) {
+            if (j+1 < address_maps) {
+                len = address_map_src[j+1] - address_map_src[j]
+                start = address_map_dst[j]
+                end   = address_map_dst[j] + len
+                if (start < startA) start = startA
+                if (end > endA) end = endA
+                if (start < end) {
+                    printe(sprintf("ERROR: Mapped destination address"  \
+                                   " conflict from 0x%08x to 0x%08x",
+                                   start, end))
+                    list_map_error(i,j)
+                    exit(1)
+                }
+            } else {
+                start = address_map_dst[j]
+                end = start + 1
+                if (start < startA) start = startA
+                if (end > endA) end = endA
+                if (start < end) {
+                    printe(sprintf("ERROR: Mapped destination address"  \
+                                   " conflict beginning at 0x%08x",
+                                   start))
+                    list_map_error(i,j)
+                    exit(1)
+                }
+                if (start < endA) {
+                    printe("ERROR: Possible destination address"        \
+                           " conflict depending on length of input.")
+                    printe(sprintf("       Final mapping destination may" \
+                                   " extend into mapping %d.",i))
+                    list_map_error(i,j)
+                    exit(1)
+                }
+            }
+        }
+    }
+}
+
+# Internally, address mapping regions are simple src/dest
+# pairs. Regions are ordered and each region stretches to the
+# next so that there are no holes.
+function add_map(dst, src, len,
+                 i, j, k, src_prev, dst_prev){
+    if (address_maps == 0) {
+        address_map_src[0] = 0
+        address_map_dst[0] = 0
+        address_maps = 1;
+    }
+    dst = strtonum(dst)
+    src = strtonum(src)
+    # find insertion point for start of map
+    for(i=0; i < address_maps; i++) {
+        if(address_map_src[i] >= src) break
+    }
+    if(len == ""){
+        # unbounded address map; add one entry from
+        # src/dest to end of file, replacing any later entries
+        address_map_src[i] = src
+        address_map_dst[i] = dst
+        address_maps = i+1;
+    } else {
+        len = strtonum(len)
+        # bounded address map; add two entries, one that enters the
+        # map and one that exits it, potentially to some previously
+        # specified map that is only being partially replaced.
+
+        # find where this map ends.  loop below saves mapping entry
+        # we're cutting/replacing.
+        src_prev = 0
+        dst_prev = 0
+        for(j=i; j < address_maps; j++) {
+            if(address_map_src[j] > src+len) break
+            src_prev = address_map_src[j];
+            dst_prev = address_map_dst[j];
+        }
+        # we'll insert two entries and delete i through j exclusive;
+        # expand/contract list past i as needed
+        if(2 > j-i) {
+            # expand
+            for(k=address_maps-1; k>=i; k--){
+                address_map_src[k+2-j+i] = address_map_src[k];
+                address_map_dst[k+2-j+i] = address_map_dst[k];
+            }
+        } else if (2 < j-i) {
+            #contract
+            for(k=i+2; k<address_maps; k++){
+                address_map_src[k] = address_map_src[k+j-i-2];
+                address_map_dst[k] = address_map_dst[k+j-i-2];
+            }
+        }
+        address_maps += 2-j+i
+        address_map_src[i+1] = src + len
+        address_map_dst[i+1] = (src + len - src_prev) + dst_prev
+        address_map_src[i] = src
+        address_map_dst[i] = dst
+    }
+}
+
 function getopts(argc, argv,
-                 i, j, options_done, options, argument){
+                 i, j, options_done, options, argument, pos){
     options_done = 0;
     for(i=1; i<argc; i++){
         option = ""
-        argument = ""
+        delete argument
         if (!options_done){
             if (argv[i] == "--") {
                 options_done = 1
@@ -422,7 +603,7 @@ function getopts(argc, argv,
                     pos = index(argv[i],"=")
                     if (pos>0) {
                         option = substr(argv[i],3,pos-3)
-                        argument = substr(argv[i],pos+1)
+                        split(substr(argv[i],pos+1),argument,",")
                     } else {
                         option = substr(argv[i],3)
                     }
@@ -432,7 +613,7 @@ function getopts(argc, argv,
                         exit(1)
                     }
                     option = substr(argv[i],2)
-                    argument = argv[i+1]
+                    split(argv[i+1],argument,",")
                 } else {
                     if (fileA == "") {
                         fileA = argv[i]
@@ -445,15 +626,15 @@ function getopts(argc, argv,
                         exit(1)
                     }
                 }
-                if (option == "c" || option == "f"){
+                if (option == "c" || option == "f" || option== "m"){
                     i++ # advance past argument
                 }
                 if (option == "c" || option == "context"){
-                    if (argument == "") {
+                    if (argument[1] == "" || argument[2] != "") {
                         usage()
                         exit(1)
                     }
-                    context = strtonum(argument);
+                    context = strtonum(argument[1]);
                     if(context < 0 || context > 16){
                         usage()
                         exit(1)
@@ -461,11 +642,11 @@ function getopts(argc, argv,
                 } else if (option == "d" || option == "minimal") {
                     minimal = "-d "
                 } else if (option == "f" || option == "fuzzy") {
-                    if (argument == "") {
+                    if (argument[1] == "" || argument[2] != "") {
                         usage()
                         exit(1)
                     }
-                    fuzzy_threshold = strtonum(argument);
+                    fuzzy_threshold = strtonum(argument[1]);
                     if(fuzzy_threshold < 0 || fuzzy_threshold>32){
                         usage()
                         exit(1)
@@ -473,6 +654,12 @@ function getopts(argc, argv,
                 } else if (option == "h" || option == "help") {
                     usage()
                     exit(0)
+                } else if (option == "m" || option == "map") {
+                    if (argument[1] == "" || argument[4] != "") {
+                        usage()
+                        exit(1)
+                    }
+                    add_map(argument[1],argument[2],argument[3])
                 } else if (option == "n" || option == "no-fuzzy") {
                     fuzzy = 0
                 } else if (option == "s" || option == "swap-endian") {
@@ -503,6 +690,17 @@ function getopts(argc, argv,
         usage()
         exit(1)
     }
+    sanity_check_maps()
+}
+
+function output_maps(\
+                     k){
+    for(k=0; k < address_maps; k++) {
+        printf "MAP: 0x%08x -> 0x%08x\n",
+            address_map_src[k],
+            address_map_dst[k]
+    }
+    if(address_maps) print ""
 }
 
 BEGIN {
@@ -522,8 +720,9 @@ BEGIN {
     old_count=0
     new_count=0
     context_count=0
-    beginning=1
+    near_beginning=1
     weighted_fuzzy=0
+    address_maps=0
 
     getopts(ARGC, ARGV)
 
@@ -564,18 +763,16 @@ BEGIN {
 
     if (color) {
         color_address_base = "\033[0;4m"
-        color_address_old = "\033[0;1;4m"
-        color_address_new = "\033[0;1;4m"
-        color_bytes_unchanged = "\033[0;2m"
+        color_address_diff = "\033[0;1;4m"
+        color_unchanged = "\033[0;2m"
         color_bytes_old = "\033[0;31;1m"
         color_bytes_new = "\033[0;32;1m"
         color_bytes_changed = "\033[0;1m"
         color_off = "\033[0m"
     } else {
         color_address_base = ""
-        color_address_old = ""
-        color_address_new = ""
-        color_bytes_unchanged=""
+        color_address_diff = ""
+        color_unchanged=""
         color_bytes_old=""
         color_bytes_new=""
         color_bytes_changed=""
@@ -591,6 +788,7 @@ BEGIN {
         "<("od_cmd" "fileA") "                                          \
         "<("od_cmd" "fileB") "                                          \
 
+    output_maps()
     while(diff_cmd | getline){
         if ($1=="="){
             line = tobinary($2" "$3" "$4" "$5)
@@ -623,5 +821,5 @@ BEGIN {
         }
     }
     if(new_count>0 || old_count>0) print_stored_diff()
-    if(!beginning) print_end()
+    if(!near_beginning) print_end()
  }
