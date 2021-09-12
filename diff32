@@ -1,39 +1,74 @@
-#!/usr/bin/awk -E
+#!/bin/sh
 
-# helper function to print the input to_print, optionally colorizing
-# the nibbles that match the comparison input to_compare using
-# the escape sequence 'off', and the nibbles that do not match with 'on'.
-# 'lock' is nonzero if a color change to 'on' should persist for the
-# rest of the string regardless of match; this is used to highlight
-# address differences.
-function print_highlight(to_print, to_compare, off, on, lock, redact,
-                         current, a, b, i){
-    current = off
+########################### diff32 bash paging wrapper ##########################
+# Implements process/pipe/signal handling for use of a default pager with the
+# diff32 gawk script. gawk doesn't offer any signal handling, thus this wrapper.
+#
+# We want ^C (SIGINT) to interrupt any in-progress/runaway computation but also
+# cleanly exit a pager.  The pager must exit first, else the terminal gets
+# clobbered by out-of-order cleanup.
+#
+# The wrapper also makes sure ^C really shuts down everything. If gawk gets hung
+# in a loop or due to a bug, it won't notice that stdout/stderr simply went away.
+# After the pager exits, the interrupt handler issues a kill 0.
+
+exec {script_fd}<<'#EOF'
+
+#################### bash script continues after gawk section ###################
+######################### diff32 gawk script begins here ########################
+#!/usr/bin/awk -E   # Unnecessary, seems clearer to include it.
+
+# Program data output
+function out(string,
+             ret){
+    if (pager) {
+        printf string | LESS
+    } else {
+        printf string
+    }
+}
+
+# Error/console output
+function err(string){
+    if (use_stdout) {
+        out(string)
+    } else {
+        print string > out_dev
+    }
+}
+
+# Redirect where console messages are going.
+function err_redirect(dev){
+    out_dev = dev
+}
+
+# Change ANSI escape color; tracks current color so that
+# repeated settings to the same color aren't output.
+function change_color(color){
+    if (current_color != color) out(color)
+    current_color = color
+}
+
+# helper function to print the input, optionally colorizing the
+# nibbles that match the comparison input to_compare using the escape
+# sequence 'off', and the nibbles that do not match with 'on'.  'lock'
+# is nonzero if a color change to 'on' should persist for the rest of
+# the string regardless of match; this is used to highlight address
+# differences.
+function out_highlight(to_print, to_compare, off_color, on_color, lock,
+                       current, a, b, i){
+    change_color(off_color)
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
         b = substr(to_compare,i,1)
         if (a != b){
-            if (current == off) {
-                if (lock) {
-                    current = lock
-                }else{
-                    current = on
-                }
-                printf on
-            }
+            change_color(on_color)
         } else {
-            if (current == on) {
-                current = off;
-                printf off
-            }
+            if (!lock) change_color(off_color)
         }
-        if(redact && a!=" "){
-            printf "."
-        } else {
-            printf a
-        }
+        out(a)
     }
-    if (current != off) printf off
+    change_color(off_color)
 }
 
 function map_an_address(addr,
@@ -59,52 +94,149 @@ function print_address(old, new,
 
     bar = " "
     if (old == old_map && new == new_map){
-        if(!color_address_base) bar = "_"
+        if(!color) bar = "_"
         base = color_address_base
         diff = color_address_diff
     } else {
         base = color_unchanged
         diff = color_unchanged
     }
-    printf bar""base
-    print_highlight(old_str,new_str,base,diff,1,0);
-    printf bar""bar""bar""bar""bar""bar""bar
-    print_highlight(new_str,old_str,base,diff,1,0);
-    printf color_off""bar"\n"
+    out(bar)
+    change_color(base)
+    out_highlight(old_str,new_str,base,diff,1);
+    out(bar""bar""bar""bar""bar""bar""bar)
+    out_highlight(new_str,old_str,base,diff,1);
+    change_color(color_off)
+    out(bar"\n")
 
     if (old != old_map || new != new_map){
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
         base = color_address_base
         diff = color_address_diff
-        if(!color_address_base) bar = "_"
+        if(!color) bar = "_"
 
-        printf "["base
-        print_highlight(old_str,new_str,base,diff,1,0);
-        printf bar""bar"MAP"bar""bar
-        print_highlight(new_str,old_str,base,diff,1,0);
-        printf color_off"]\n"
+        out("[")
+        change_color(base)
+        out_highlight(old_str,new_str,base,diff,1);
+        out(bar""bar"MAP"bar""bar)
+        out_highlight(new_str,old_str,base,diff,1);
+        change_color(color_off)
+        out("]\n")
     }
 }
 
 # print one line of a diff block
-function print_line(old, c, new) {
-    if(c == " "){
-        printf color_unchanged" %s  %s  %s"color_off, old, c, new
-    }else{
-        printf " "
-        print_highlight(old,new,color_off,color_bytes_old,0,embargo);
-        if (c == "<") {
-            printf color_bytes_old
-        } else if (c == ">" ){
-            printf color_bytes_new
-    } else if (c == "!" ){
-            printf color_bytes_changed
+function print_words(old_word, new_word,
+                    c, ccolor) {
+    if(old_word == new_word){
+        change_color(color_unchanged)
+        out(sprintf(" %s  %s  %s\n", old_word, " ", new_word))
+        change_color(color_off)
+        old_cursor++
+        new_cursor++
+    } else {
+        c = "!"
+        ccolor = color_bytes_unchanged
+        if (old_word == "") {
+            c = ">"
+            old_word = "           "
+            ccolor = color_bytes_new
+        } else {
+            old_cursor++
         }
-        printf "  %s  "color_off, c
-        print_highlight(new,old,color_off,color_bytes_new,0,0);
+        if (new_word == ""){
+            c = "<"
+            new_word = "           "
+            ccolor = color_bytes_old
+        } else {
+            new_cursor++
+        }
+        out(" ")
+        out_highlight(old_word,new_word,color_off,color_bytes_old,0)
+        change_color(ccolor)
+        out(sprintf("  %s  ", c))
+        change_color(color_off)
+        out_highlight(new_word,old_word,color_off,color_bytes_new,0);
+        out("\n")
     }
-    printf "\n"
+}
+
+function print_end(){
+    out("\n ----------- END ----------- \n")
+}
+
+function format_word(line){
+    if(line == ""){
+        return line
+    } else {
+        return sprintf("%2s %2s %2s %2s",
+                       substr(line,2,2),
+                       substr(line,4,2),
+                       substr(line,6,2),
+                       substr(line,8,2))
+    }
+}
+
+function flush_consolidation(){
+
+
+}
+
+function consolidate_words(old_word, new_word){
+    print_words(old_word, new_word)
+
+}
+
+# Toplevel for line-by-line output handling; manages context, address
+# output and line formatting
+function submit_line(old_line, new_line,
+                     i, old_word, new_word){
+    old_word = format_word(old_line)
+    new_word = format_word(new_line)
+    if(old_word == new_word){
+        # context and identical lines are not consolidated or redacted,
+        # but we may need to flush existing consolidation
+        flush_consolidation()
+        # push the line into context or print it?
+        if(context_count<0){
+            # running out post-context, so print
+            print_words(old_word,old_word)
+            context_count++
+        } else {
+            # already passed [context] identical lines, push to context queue
+            for(i=context_count;i>0;i--) {
+                context_word[i]=context_word[i-1]
+            }
+            context_word[0] = old_word
+            if( context_count < context) {
+                context_count++
+            }else{
+                # a line got pushed out of the context, update the
+                # print address cursors
+                old_cursor++
+                new_cursor++
+            }
+        }
+    } else {
+        # Do we need to print an address header?
+        if (context_count >= context || near_beginning) {
+            # Yes. post-context has run out, or we're at/near
+            # beginning of file.  Skip a line for visual break and
+            # print an address header.
+            if (!near_beginning) out("\n")
+            print_address(old_cursor*4, new_cursor*4)
+            near_beginning=0
+        }
+        # Print any pending pre-context
+        for(i=context_count;i>0;i--) {
+            print_words(context_word[i-1],context_word[i-1])
+        }
+        # Mark need for trailing context before starting a new address block
+        context_count= -context
+        # Consolidate words, flush/print when needed
+        consolidate_words(old_word, new_word)
+    }
 }
 
 # simple abs() function as there's no relaibly available built-in
@@ -113,387 +245,371 @@ function abs(v){
     return v
 }
 
-# Compare the binary strings A and B, each consisting of 4 octets
-# separated by spaces, each octet containing the characters '1' or
-# '0', and produce a similarity score.  The scoring works 8 bits at a
-# time, partly to avoid any issues with endianness.  It counts runs of
-# matching characters, weights each run, and sums the weighted run
-# values into a raw score. Finally, we adjust this score, reducing it
-# according to a basic entropy measure (ie, if our input is nearly all
-# zeros or nearly all ones, there's probably not much actual entropy
-# there.  Think of long 'empty' runs of 0x00000000 or 0xffffffff in
-# typical binaries; fuzzy matching needs to mostly disregard them).
-function score_line(A, B,
-                    i, j, ones, run_total, run, Ab, Bb, score){
-    ones = 0
-    run_total = 0
+function push_old(line){
+    old_line[old_count++]=line
+    old_advance--
+}
 
-    for (j=1; j <=35; j+=9) {
-        run = 1
-        for (i=0; i<8; i++) {
-            Ab = substr(A,i+j,1)
-            Bb = substr(B,i+j,1)
-            if (Ab == "0") {
-                if(Bb == "0") {
-                    run++
-                } else {
-                    ones++
-                    run_total += run_weight[run]
-                    run = 1
-                }
-            } else {
-                ones++
-                if(Bb == "1") {
-                    ones++
-                    run++
-                } else {
-                    run_total += run_weight[run]
-                    run = 1
-                }
+function push_new(line){
+    new_line[new_count++]=line
+    new_advance--
+}
+
+function remove_old(num,
+                      j){
+    # More concerned about being correct than
+    # efficient right now, so doing it the simple way and just
+    # shifting the line buffers.
+    old_count -= num
+    for(j=0; j<old_count; j++) old_line[j]=old_line[j+num]
+}
+
+function remove_new(num,
+                      j){
+    # More concerned about being correct than
+    # efficient right now, so doing it the simple way and just
+    # shifting the line buffers.
+    new_count -= num
+    for(j=0; j<new_count; j++) new_line[j]=new_line[j+num]
+}
+
+function remove_lines(num,
+                      j){
+    remove_old(num)
+    remove_new(num)
+}
+
+
+function output_split(old_end, new_end,
+                     i, j, old_pos, new_pos){
+    # search exact word match up from bottom
+    old_pos=old_end
+    new_pos=new_end
+    while(old_pos>0 && new_pos>0){
+        if(substr(old_line[old_pos-1],2,8)!=            \
+           substr(new_line[new_pos-1],2,8))break;
+        old_pos--
+        new_pos--
+    }
+
+    for(i=0; i<old_pos && i<new_pos; i++)
+        submit_line(old_line[i], new_line[i])
+    for(j=i; j<old_pos; j++)
+        submit_line(old_line[j],"")
+    for(j=i; j<new_pos; j++)
+        submit_line("",new_line[j])
+
+    # now push the exact bottom matches
+    while(old_pos<old_end && new_pos<new_end){
+        submit_line(old_line[old_pos], new_line[new_pos])
+        old_pos++
+        new_pos++
+    }
+    # done
+    remove_old(old_end)
+    remove_new(new_end)
+}
+
+function match_forward(old_end, new_end,
+                       i){
+    # Excluding words from the initial exact natching through diff
+    # will result in diff sections that begin with or consist
+    # entirely of lines that actually do match.  Start by
+    # submitting these exact matches (which will handle any
+    # outputting needed).  Similarly, the recursive parsing breaks
+    # up regions by exact match, and those exact matches will need
+    # to be pushed here as well.
+    for(i=0; i<old_end && i<new_end; i++){
+        if(substr(old_line[i],2,8) != substr(new_line[i],2,8))break
+        submit_line(old_line[i],new_line[i])
+    }
+
+    # Submitted lines need to be removed from the old and
+    # new line lists.
+    if (i>0) remove_lines(i)
+    return i
+}
+
+function match_search(old_end, new_end, pos_return,
+                      i, j){
+    # search by increasing offset
+    for (j=0; j<old_end || j<new_end; j++) {
+        # common overlap loop
+        for(i=0; i<new_end-j && i<old_end-j; i++){
+            if(old_line[i] == new_line[i+j]) {
+                pos_return["old"] = i
+                pos_return["new"] = i+j
+                pos_return["off"] = -j
+                return
+            }
+            if(old_line[i+j] == new_line[i]) {
+                pos_return["old"] = i+j
+                pos_return["new"] = i
+                pos_return["off"] = j
+                return
             }
         }
-        run_total += run_weight[run]
-    }
-    score = run_total - entropy_weight[abs(32-ones)+1]
-    if(score < 0) score = 0
-    return score
-}
-
-# Computes a fuzzy match score for the currently loaded old/new lines,
-# overlapped by the passed in offset.
-function compute_match(offset,
-                       i, score, value, max, start, count) {
-    score = 0
-    max = 0
-
-    # Deemphasis reduces short match scores relative to long matches,
-    # as their smaller samples size makes strong high scores
-    # relatively more likely.
-    count = small_match_derate
-
-    if(offset < 0) {
-        start = 0
-    } else {
-        start = offset;
-    }
-    for(i=start; i<old_count && i<new_count+offset; i++){
-        value = score_line(old_line[i],new_line[i-offset])
-        if (value>max) max = value
-        score += value
-        count++
-    }
-    if(count <= 0) return 0
-
-    # Make score relative to match size.
-    score /= count
-
-    # Reject weak matches.  A 'weak match' is a maximum match score of
-    # less than ~ 8 contiguous bits and an overall average score of
-    # lewss than half that maximum.
-    if (max < weighted_fuzzy || score < weighted_fuzzy/2)
-        return -1
-
-    # Weight toward the zero offset
-    if(offset == 0) {
-        score = zero_weight*(score+zero_offset)
-    }
-    return score
-}
-
-# overlap offset is the amount by which the new_lines block is offset
-# relative to the old_lines block.  Negative indicates the new_lines
-# start first, positive indicates new_lines beginning follows
-# old_lines beginning.
-function overlap_stored_diff(\
-    i, best_overlap, best_score, score) {
-    # Diff hands all changes to us as a set of < lines and then >
-    # lines.  Diff does not do fuzzy matching, and we probably don't
-    # want to mangle together a diff incant that tries. We look for
-    # overlaps using partial matches ourselves here.
-
-    # always present isolated single-line changes are overlaps.
-    if(old_count == 1 && new_count == 1) return 0
-
-    # If we have only one set of changes (pure deletion or pure insertion)
-    # there's no point in checking further.
-    if(old_count == 0 || new_count == 0) return 0
-
-    # Don't try to overlap large changes; the search will take too
-    # long, and it's not clear to me we're likely to find a good match
-    # anyway.  If this guess proves wrong, we can try harder in the future.
-    if(old_count > 256 && new_count > 256) return old_count
-
-    # Search for overlap by comparing each offset.
-    # Choose the high score as our match, break ties by closest to zero.
-    best_overlap = 0
-    best_score = compute_match(0)
-
-    for (i=1; i<=old_count || i<=new_count; i++) {
-        if (i<=old_count) {
-            score = compute_match(i)
-            if(score > best_score) {
-                best_overlap = i;
-                best_score = score;
+        # more negative offset to search?
+        while(i<new_end-j && i<old_end){
+            if(old_line[i] == new_line[i+j]){
+                pos_return["old"] = i
+                pos_return["new"] = i+j
+                pos_return["off"] = -j
+                return
             }
+            i++
         }
-        if (i<=new_count) {
-            score = compute_match(-i)
-            if(score > best_score) {
-                best_overlap = -i;
-                best_score = score;
+        # more positive offset to search?
+        while(i<old_end-j && i<new_end){
+            if(old_line[i+j] == new_line[i]){
+                pos_return["old"] = i+j
+                pos_return["new"] = i
+                pos_return["off"] = j
+                return
             }
+            i++
         }
     }
-
-    # If we found no strong matches, best score will be -1.  In this
-    # case, return a non-overlap, that is, deletions followed by
-    # insertions.
-    if (best_score == -1) return old_count
-
-    return best_overlap
+    pos_return["old"] = old_end
+    pos_return["new"] = new_end
+    pos_return["off"] = old_end - new_end
 }
 
-# Input from od is hexadecimal octets separated by spaces.  Output is
-# binary octets separated by spaces. Input order is preserved (order
-# of the octets themselves is irrelevant to the fuzzy matching).
-function tobinary(hex_input_line,
-                  i, ret) {
-    ret=""
-    for(i=1; i<=length(hex_input_line); i++){
-        ret = ret""binary_nibbles[substr(hex_input_line,i,1)]
-    }
-    return ret
+function trim_for_subsearch(old_end, new_end, len,
+                                   i){
+    for(i=0; i<old_end; i++) old_line[i] = substr(old_line[i],1,len)
+    for(i=0; i<new_end; i++) new_line[i] = substr(new_line[i],1,len)
 }
 
-# map from internal binary strings back to space-separated hex
-# octets for printing
-function tohex(binary_input_line,
-                  i, j, n0, n1, ret){
-    ret = ""
-    for(i=1; i+7<=length(binary_input_line); i+=9) {
-        n0 = 0
-        n1 = 0
-        for(j=0; j<4; j++)
-            n0 = (n0*2) + substr(binary_input_line,i+j,1)+0
-        for(; j<8; j++)
-            n1 = (n1*2) + substr(binary_input_line,i+j,1)+0
-        if (i==1){
-            ret = sprintf("%x%x",n0,n1)
-        } else {
-            if (swap) {
-                ret = sprintf("%x%x %s",n0,n1,ret)
-            } else {
-                ret = sprintf("%s %x%x",ret,n0,n1)
-            }
+function set_exclusions(old_end,
+                        i){
+    for(i=0; i<old_end; i++)
+        old_line[i]=gensub(/(w)(00000000|ffffffff)/,"x\\2","g",old_line[i])
+}
+
+
+function clear_exclusions(old_end,
+                          i){
+    for(i=0; i<old_end; i++) gsub(/x/,"w",old_line[i])
+}
+
+function weak_split(old_end, new_end, threshold,
+                    i, j, pos){
+    if(threshold < match_words_min){
+        clear_exclusions(old_end)
+        output_split(old_end, new_end)
+    }else{
+        # Rather than complicating match with substr, perform it up front.
+        trim_for_subsearch(old_end, new_end, threshold*9)
+
+        while (new_end>0 || old_end>0) {
+            i = match_forward(old_end, new_end)
+            # update our own local subset end count
+            old_end -= i
+            new_end -= i
+            # Do nothing further if that was the whole section.
+            if(old_end==0 && new_end==0) break;
+
+            # Look forward for exact matches; we split diff parsing at
+            # that point.
+            match_search(old_end, new_end, pos)
+
+            # recurse, match or no.
+            weak_split(pos["old"], pos["new"], threshold-1)
+
+            # The weak_split call will always consume the entire region
+            # passed to it.
+            old_end -= pos["old"]
+            new_end -= pos["new"]
         }
     }
-    return ret
 }
 
-function print_stored_diff(                                     \
-    old_start, new_start, diff_start, overlap_offset, i, tmp) {
-    old_start = old_cursor - old_count*4;
-    new_start = new_cursor - new_count*4;
+# Successively break up initial region by exact matches searched by
+# increasing offset.
+function strong_split(old_end, new_end,
+                      i, j, pos){
+    while (new_end>0 || old_end>0) {
+        i = match_forward(old_end, new_end)
+        # update our own local subset end count
+        old_end -= i
+        new_end -= i
+        # Do nothing further if that was the whole section.
+        if(old_end==0 && new_end==0) break
 
-    if (context_count >= context || near_beginning) {
-        # post-context has run out, or we're at/near beginning of file.
-        # Skip a line for visual break and print an address header.
-        if (!near_beginning) printf "\n"
-        print_address(old_start, new_start)
-        near_beginning=0
-    }
-    # print any pending pre-context
-    for(i=context_count;i>0;i--) {
-        print_line(context_line[i-1]," ",context_line[i-1])
-    }
+        # Look forward for exact matches; we split diff parsing at
+        # that point.
+        match_search(old_end, new_end, pos)
 
-    # the actual differing lines
-    if (fuzzy) {
-        overlap_offset = overlap_stored_diff()
-    } else {
-        overlap_offset = old_count
-    }
-    if(overlap_offset < 0) {
-        diff_start = overlap_offset;
-    } else {
-        diff_start = 0;
-    }
-    for(i=diff_start; i<old_count || i<new_count+overlap_offset; i++){
-        if(i>=0 && i<old_count){
-            if(i>=overlap_offset && i<new_count+overlap_offset){
-                # Although I don't think diff will ever return any
-                # matching lines in the diff segments, handle the
-                # possibility.
-                if(old_line[i] == new_line[i-overlap_offset]){
-                    print_line(tohex(old_line[i]),
-                               " ",
-                               tohex(new_line[i-overlap_offset]))
-                } else {
-                    print_line(tohex(old_line[i]),
-                               "!",
-                               tohex(new_line[i-overlap_offset]))
-                }
-            } else {
-                if(embargo){
-                    if(i==0){
-                        printf color_bytes_old" [%9s]  <\n"color_off,
-                            sprintf("0x%x",old_count)
-                    }
-                }else{
-                    print_line(tohex(old_line[i]),"<","           ")
-                }
-            }
-        }else{
-            print_line("           ",">",tohex(new_line[i-overlap_offset]))
+        # If no exact matches, our region is not bookmarked by
+        # initial matches, and so we don't have enough information
+        # to make a good submatch.  Return.
+        if(pos["old"] == old_end) break
+
+        # if no currently active match horizon point, set it
+        if(!advance_active){
+            advance_active = 1
+            old_advance = horizon
+            new_advance = horizon
         }
-    }
-    old_count=0
-    new_count=0
-    context_count= -context
-}
+        if(old_advance>0 || new_advance>0) return
+        old_advance = 0
+        new_advance = 0
+        advance_active = 0
 
-function print_end(){
-    printf "\n ----------- END ----------- \n"
-}
+        # Check the buffered horizon against the offset.  We want
+        # sufficient lookahead to make strong, low-offset matches
+        # before doing lots of subdivision.  Thus we want to avoid
+        # making immediate high-offset matches that would prevent
+        # better low-offset matches in the future.
 
-function out(string){
-    if (use_stderr) {
-        print string | "cat 1>&2"
-    } else {
-        print string
+        # Heuristic is to make sure that there's sufficient buffer
+        # that the matching positions from above would still land in
+        # the existing the buffer if the offset sign is flipped.
+
+        if(!diff_eof){
+            new_advance = pos["old"] + horizon - new_end + pos["off"]*2
+            old_advance = pos["new"] + horizon - old_end - pos["off"]*2
+            if(new_advance > 0 || old_advance > 0){
+                advance_active = 1
+                return
+            }
+        }
+
+        # Recurse to subdivide
+        set_exclusions(old_end)
+        weak_split(pos["old"], pos["new"], match_words_max-1)
+
+        # Upon returning, we've parsed, output, and removed the
+        # regions that previously stretched from [0 .. old_pos)
+        # and [0 .. newpos). Update our own subset and iterate.
+        old_end -= pos["old"]
+        new_end -= pos["new"]
     }
 }
 
 function stdout_usage(){
-    save_stderr = use_stderr
-    use_stderr = err
+    err_redirect("/dev/stdout")
     usage()
-    use_stderr = save_stderr
+    err_redirect("/dev/stderr")
 }
 
 function usage(){
-    out("")
-    out("diff32 : A 'diff'-style comparison tool for raw 32 bit binaries")
-    out("")
-    out("USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin")
-    out("")
-    out("OPTIONS:")
-    out("")
-    out("  -c, --context=NUM")
-    out("")
-    out("     Include NUM lines of copied context before and after changes.")
-    out("     Minimum value is 0, maximum is 16.  Default is 3.")
-    out("")
-    out("  -d, --minimal")
-    out("")
-    out("     Try hard to find a smaller set of changes.")
-    out("")
-    out("  -e, --embargo-deletion")
-    out("")
-    out("     Emit deletions as placeholders indicating the number of words")
-    out("     omitted from fileA. Emit line changes (ie, ! lines) with words")
-    out("     from fileA obscured. Context is set to zero, but may be over-")
-    out("     ridden by following with -c LINES.  Embargo is intended to")
-    out("     minimize the amount of fileA included in output.")
-    out("")
-    out("  -f, --fuzzy=NUM")
-    out("")
-    out("     Adjust the matching threshold that diff32 uses to present two")
-    out("     regions as overlapping/similar using '!', instead of deletions")
-    out("     '<' followed by insertions '>'. Fuzzy matching is nonlinear, but")
-    out("     the value roughly sets the minimum sequence of matching bits to")
-    out("     consider two words a loose match.  Note that single-line")
-    out("     changes are always presented as '!' regardless of match.")
-    out("     Minimum value is 0, max is 32. Default is 16 (two 8-bit bytes).")
-    out("")
-    out("  -h, --help")
-    out("")
-    out("     Out(this help message and exit.")
-    out("")
-    out("  -m, --map=DESTINATION[,SOURCE[,LENGTH]]")
-    out("")
-    out("     Map displayed input byte range of LENGTH bytes starting at")
-    out("     SOURCE byte offset to the range beginning at DESTINATION.  -m")
-    out("     only affects displayed addresses, not match or output order.")
-    out("     Omitting LENGTH extends range to the end of the file.  Omitting")
-    out("     both SOURCE and LENGTH maps the entire input. More than one")
-    out("     range may be specified. Later overlapping input ranges override")
-    out("     earlier ranges. Final destination ranges may not overlap. Values")
-    out("     may be decimal, octal (leading 0) or hexadecimal (leading 0x).")
-    out("")
-    out("  -n, --no-fuzzy")
-    out("")
-    out("     Do not perform 'fuzzy' overlap matching.  Presents output")
-    out("     as deletions ('<') followed by insertions ('>') only, with no")
-    out("     change ('!') lines (including no single-line changes).")
-    out("")
-    out("  -s, --swap-endian")
-    out("")
-    out("     diff32 normally presents bytes in as-read order. -s instructs")
-    out("     diff32 to swap the order it prints bytes on each line. -s has")
-    out("     no effect on matching as matching is endian-agnostic.")
-    out("")
-    out("  -v, --version")
-    out("")
-    out("     Out(version and exit.")
-    out("")
-    out("  --color")
-    out("")
-    out("     Colorize the output.")
-    out("")
-    out("DETAILS:")
-    out("")
-    out("     diff32 is an awk script wrapping the od and diff utilities")
-    out("     that produces a human-readable side-by-side text summary of")
-    out("     differences between two raw 32-bit binary files.")
-    out("")
-    out("     diff32 searches for insertions, deletions, and co-located")
-    out("     changes. By default, it will also perform fuzzy matching to")
-    out("     align regions of similar content.")
-    out("")
-    out("EXAMPLE:")
-    out("")
-    out("  diff32 -d --color mips_binary1.bin mips_binary2.bin | less -R")
-    out("")
-    out("     Produce a colorized summary of the differences in binary files")
-    out("     mips_binary1.bin and mips_binary2.bin, presented on the terminal")
-    out("     one page at a time using the 'less' utility. The -d option to")
-    out("     diff32 requests extra time be spent to minimize the change")
-    out("     set. The -R option instructs less to allow ANSI color codes.")
-    out("")
-    out("AUTHOR:")
-    out("")
-    out("     Written by Monty Montgomery <monty@xiph.org>")
-    out("     This is free software: you are free to change and redistribute")
-    out("     it.  There is NO WARRANTY, to the extent permitted by law.")
-    out("")
-    out("SEE ALSO:")
-    out("")
-    out("  od(1), diff(1), cmp(1), xdelta(1)")
-    out("")
-}
-
-function version () {
-    save_stderr = use_stderr
-    use_stderr = err
-    print ""
-    print "diff32 version 0.0.2"
-    if ("awk --version" | getline) {
-        print $0
-    }
-    if ("diff --version" | getline) {
-        print $0
-    }
-    if ("od --version" | getline) {
-        print $0
-    }
-    print ""
-    use_stderr = save_stderr
+    err("")
+    err("diff32 : A 'diff'-style comparison tool for raw 32 bit binaries")
+    err("")
+    err("USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin")
+    err("")
+    err("OPTIONS:")
+    err("")
+    err("  -c, --context=NUM")
+    err("")
+    err("     Include NUM lines of copied context before and after changes.")
+    err("     Minimum value is 0, maximum is 16.  Default is 3.")
+    err("")
+    err("  -d, --minimal")
+    err("")
+    err("     Try hard to find a smaller set of changes.")
+    err("")
+    err("  -e, --embargo-deletion")
+    err("")
+    err("     Emit deletions as placeholders indicating the number of words")
+    err("     omitted from fileA. Emit line changes (ie, ! lines) with words")
+    err("     from fileA obscured. Context is set to zero, but may be over-")
+    err("     ridden by following with -c LINES.  Embargo is intended to")
+    err("     minimize the amount of fileA included in output.")
+    err("")
+    err("  -h, --help")
+    err("")
+    err("     Output this help message and exit.")
+    err("")
+    err("  -l, --minimum-match-length=NUM")
+    err("")
+    err("     Sets the minimum length in words of a match when performing")
+    err("     subdivision of large regions.  NUM may be 1 through 32 (default")
+    err("     is 2 lines/words) and must be less than or equal to the initial")
+    err("     match length.")
+    err("")
+    err("  -L, --initial-match-length=NUM")
+    err("")
+    err("     Sets the required match length in words when doing initial")
+    err("     matching of large regions. NUM may be 1 through 32 (default")
+    err("     is 8 lines/words) and must be greater than or equal to the")
+    err("     minimum match length.")
+    err("")
+    err("  -m, --map=DESTINATION[,SOURCE[,LENGTH]]")
+    err("")
+    err("     Map displayed input byte range of LENGTH bytes starting at")
+    err("     SOURCE byte offset to the range beginning at DESTINATION.  -m")
+    err("     only affects displayed addresses, not match or output order.")
+    err("     Omitting LENGTH extends range to the end of the file.  Omitting")
+    err("     both SOURCE and LENGTH maps the entire input. More than one")
+    err("     range may be specified. Later overlapping input ranges override")
+    err("     earlier ranges. Final destination ranges may not overlap. Values")
+    err("     may be decimal, octal (leading 0) or hexadecimal (leading 0x).")
+    err("")
+    err("  -n, --no-pager")
+    err("")
+    err("  -p, --pager")
+    err("")
+    err("  -s, --swap-endian")
+    err("")
+    err("     diff32 normally presents bytes in as-read order. -s instructs")
+    err("     diff32 to swap the order it prints bytes on each line. -s has")
+    err("     no effect on matching as matching is endian-agnostic.")
+    err("")
+    err("  -v, --version")
+    err("")
+    err("     Output version and exit.")
+    err("")
+    err("  -z, --extend-horizon=NUM")
+    err("")
+    err("     Add NUM additional words to the computed lookahead horizon when")
+    err("     searching for initial matches with the lowest possible offsets.")
+    err("     NUM may be between zero (disabling lookahead) and 4096. Higher")
+    err("     values may produce better output at the cost of greatly increased")
+    err("     computation time.  The default value is 32.")
+    err("")
+    err("  --color")
+    err("")
+    err("     Colorize the output.")
+    err("")
+    err("  --no-color")
+    err("")
+    err("     Do not colorize the output.")
+    err("")
+    err("DETAILS:")
+    err("")
+    err("     diff32 is an awk script that wraps the standard diff utility")
+    err("     to produce a human-readable side-by-side text summary of")
+    err("     differences between two raw 32-bit binary files. diff32 ")
+    err("     searches for changes, insertions, and deletions.")
+    err("")
+    err("EXAMPLE:")
+    err("")
+    err("  diff32 -d --color mips_binary1.bin mips_binary2.bin | less -R")
+    err("")
+    err("     Produce a colorized summary of the differences in binary files")
+    err("     mips_binary1.bin and mips_binary2.bin, presented on the terminal")
+    err("     one page at a time using the 'less' utility. The -d option to")
+    err("     diff32 requests extra time be spent to minimize the change")
+    err("     set. The -R option instructs less to allow ANSI color codes.")
+    err("")
+    err("AUTHOR:")
+    err("")
+    err("     Written by Monty Montgomery <monty@xiph.org>")
+    err("     This is free software: you are free to change and redistribute")
+    err("     it.  There is NO WARRANTY, to the extent permitted by law.")
+    err("")
+    err("SEE ALSO:")
+    err("")
+    err("  diff(1), cmp(1), xdelta(1), awk(1)")
+    err("")
 }
 
 function list_map_error(i, j,
                         k, str){
-    printe("       Requested mapping ranges:")
+    err("       Requested mapping ranges:")
     for(k=0; k < address_maps; k++) {
         if (k+1 < address_maps) {
             str = sprintf("       %d) src: [0x%08x..0x%08x) -> "        \
@@ -512,9 +628,9 @@ function list_map_error(i, j,
         if (k==i || k==j) {
             str=str" <<<"
         }
-        printe(str)
+        err(str)
     }
-    printe("")
+    err("")
 }
 
 function sanity_check_maps(                                             \
@@ -531,9 +647,9 @@ function sanity_check_maps(                                             \
                 if (start < startA) start = startA
                 if (end > endA) end = endA
                 if (start < end) {
-                    printe(sprintf("ERROR: Mapped destination address"  \
-                                   " conflict from 0x%08x to 0x%08x",
-                                   start, end))
+                    err(sprintf("ERROR: Mapped destination address"     \
+                                " conflict from 0x%08x to 0x%08x",
+                                start, end))
                     list_map_error(i,j)
                     exit(1)
                 }
@@ -543,17 +659,17 @@ function sanity_check_maps(                                             \
                 if (start < startA) start = startA
                 if (end > endA) end = endA
                 if (start < end) {
-                    printe(sprintf("ERROR: Mapped destination address"  \
-                                   " conflict beginning at 0x%08x",
-                                   start))
+                    err(sprintf("ERROR: Mapped destination address"     \
+                                " conflict beginning at 0x%08x",
+                                start))
                     list_map_error(i,j)
                     exit(1)
                 }
                 if (start < endA) {
-                    printe("ERROR: Possible destination address"        \
-                           " conflict depending on length of input.")
-                    printe(sprintf("       Final mapping destination may" \
-                                   " extend into mapping %d.",i))
+                    err("ERROR: Possible destination address"           \
+                        " conflict depending on length of input.")
+                    err(sprintf("       Final mapping destination may"  \
+                                " extend into mapping %d.",i))
                     list_map_error(i,j)
                     exit(1)
                 }
@@ -622,6 +738,30 @@ function add_map(dst, src, len,
     }
 }
 
+function version () {
+    out("\n")
+    out("diff32 version 0.0.3\n")
+    if ("/usr/bin/awk --version" | getline) {
+        out($0"\n")
+    }
+    if (DIFF" --version" | getline) {
+        out($0"\n")
+    }
+    if (LESS" --version" | getline) {
+        out($0"\n")
+    }
+    out("\n")
+}
+
+function opterr(msg){
+    err("\n")
+    err("diff32: "msg"\n")
+    err("        See man page or diff32 --help for more information.\n")
+    err("\n")
+    close("/dev/stdout")
+    exit(1)
+}
+
 function getopts(argc, argv,
                  i, j, options_done, options, argument, pos){
     options_done = 0;
@@ -642,8 +782,7 @@ function getopts(argc, argv,
                     }
                 } else if (substr(argv[i],1,1) == "-"){
                     if(length(argv[i])>2){
-                        usage()
-                        exit(1)
+                        opterr("Error parsing command line argument.")
                     }
                     option = substr(argv[i],2)
                     split(argv[i+1],argument,",")
@@ -655,59 +794,71 @@ function getopts(argc, argv,
                         fileB = argv[i]
                         continue
                     } else {
-                        usage()
-                        exit(1)
+                        opterr("Too many files specified on command line.")
                     }
                 }
-                if (option == "c" || option == "f" || option== "m"){
+                if (option == "c" || option=="l" || option=="L" || option== "m" ||
+                    option == "z"){
                     i++ # advance past argument
                 }
                 if (option == "c" || option == "context"){
                     if (argument[1] == "" || argument[2] != "") {
-                        usage()
-                        exit(1)
+                        opterr("Context takes a single argument.")
                     }
                     context = strtonum(argument[1]);
                     if(context < 0 || context > 16){
-                        usage()
-                        exit(1)
+                        opterr("Context argument must be in the range 0..16.")
                     }
                 } else if (option == "d" || option == "minimal") {
                     minimal = "-d "
                 } else if (option == "e" || option == "embargo-deletion") {
                     embargo = 1
                     context = 0
-                } else if (option == "f" || option == "fuzzy") {
+                } else if (option == "l" || option == "minimum-match-length") {
                     if (argument[1] == "" || argument[2] != "") {
-                        usage()
-                        exit(1)
+                        opterr("Minimum match length takes a single argument.")
                     }
-                    fuzzy_threshold = strtonum(argument[1]);
-                    if(fuzzy_threshold < 0 || fuzzy_threshold>32){
-                        usage()
-                        exit(1)
+                    match_words_min = strtonum(argument[1]);
+                    if(match_words_min < 1 || match_words_min>32){
+                        opterr("Minimum match length must be in the range 1..32.")
+                    }
+                } else if (option == "L" || option == "initial-match-length") {
+                    if (argument[1] == "" || argument[2] != "") {
+                        opterr("Initial match length takes a single argument.")
+                    }
+                    match_words_max = strtonum(argument[1]);
+                    if(match_words_max < 1 || match_words_max>32){
+                        opterr("Initial match length must be in the range 1..32.")
                     }
                 } else if (option == "h" || option == "help") {
                     stdout_usage()
                     exit(0)
                 } else if (option == "m" || option == "map") {
                     if (argument[1] == "" || argument[4] != "") {
-                        usage()
-                        exit(1)
+                        opterr("Map option takes one to three comma-separated arguments.")
                     }
                     add_map(argument[1],argument[2],argument[3])
-                } else if (option == "n" || option == "no-fuzzy") {
-                    fuzzy = 0
+                } else if (option == "n" || option == "no-pager") {
+                    pager = 0
+                } else if (option == "p" || option == "pager") {
+                    pager = 1
                 } else if (option == "s" || option == "swap-endian") {
                     swap = 1
                 } else if (option == "v" || option == "version") {
                     version()
                     exit(0)
+                } else if (option == "z" || option == "extend-horizon"){
+                    if (argument[1] == "" || argument[2] != "") {
+                        opterr("Horizon option takes a single argument.")
+                    }
+                    horizon = strtonum(argument[1]);
+                    if(horizon < 0 || horizon > 4096){
+                        opterr("Horizon argument must be in the range 0..4096.")
+                    }
                 } else if (option == "color") {
                     color = 1
                 } else {
-                    usage()
-                    exit(1)
+                    opterr("Unknown arguemnt on command line.")
                 }
             }
         } else {
@@ -716,15 +867,17 @@ function getopts(argc, argv,
             } else if (fileB =="") {
                 fileB = argv[i]
             } else {
-                usage()
-                exit(1)
+                opterr("Too many files specified on command line.")
             }
         }
     }
 
     if(fileA == "" || fileB == ""){
-        usage()
-        exit(1)
+        opterr("Missing input file(s).")
+    }
+
+    if(match_words_min>match_words_max){
+        opterr("Minimum match length must be less than or equal to initial match length.")
     }
     sanity_check_maps()
 }
@@ -732,73 +885,66 @@ function getopts(argc, argv,
 function output_maps(\
                      k){
     for(k=0; k < address_maps; k++) {
-        printf "MAP: 0x%08x -> 0x%08x\n",
-            address_map_src[k],
-            address_map_dst[k]
+        err(sprintf("MAP: 0x%08x -> 0x%08x\n",
+                    address_map_src[k],
+                    address_map_dst[k]))
     }
-    if(address_maps) print ""
+    if(address_maps) out("\n")
+}
+
+function is_stdout_a_tty() {
+    return system("[[ ! -t 1 ]]")
+}
+
+function find_util(path, envvar,
+                   cmd){
+    if(ENVIRON[envvar])path = ENVIRON[envvar]
+    cmd = "which "path
+    cmd|getline
+    close(cmd)
+    if(!$0) err("diff32: Can't find '"path"' utility in the path.")
+    return $0
 }
 
 BEGIN {
-    context=3
-    color=0
-    minimal=""
-    fuzzy_threshold=16
-    fuzzy=1
-    swap=0
-    embargo=0
-    # weight slightly toward zero offset
-    zero_offset = 2
-    zero_weight = 1.10
-    small_match_derate = 1
+    # arguments
+    context = 3
+    color = -1
+    minimal = ""
+    swap = 0
+    embargo = 0
+    match_words_min = 2
+    match_words_max = 8
+    horizon = 32
+    pager = 0
 
+    # global state variables
     old_cursor=0
     new_cursor=0
     old_count=0
     new_count=0
+    old_advance=0
+    new_advance=0
+    advance_active=0
+    diff_eof=0
     context_count=0
     near_beginning=1
-    weighted_fuzzy=0
     address_maps=0
-    use_stderr=1
+    out_dev="/dev/stderr"
 
+#    if(is_stdout_a_tty()){
+#        pager = 1
+#    }
     getopts(ARGC, ARGV)
-
-    binary_nibbles[" "] = " "
-    binary_nibbles["0"] = "0000"
-    binary_nibbles["1"] = "0001"
-    binary_nibbles["2"] = "0010"
-    binary_nibbles["3"] = "0011"
-    binary_nibbles["4"] = "0100"
-    binary_nibbles["5"] = "0101"
-    binary_nibbles["6"] = "0110"
-    binary_nibbles["7"] = "0111"
-    binary_nibbles["8"] = "1000"
-    binary_nibbles["9"] = "1001"
-    binary_nibbles["a"] = "1010"
-    binary_nibbles["b"] = "1011"
-    binary_nibbles["c"] = "1100"
-    binary_nibbles["d"] = "1101"
-    binary_nibbles["e"] = "1110"
-    binary_nibbles["f"] = "1111"
-
-    split("0 1 2 4 8 12 16 20 28 ",
-          run_weight,
-          " ")
-
-    while (fuzzy_threshold > 8) {
-        weighted_fuzzy += run_weight[9]
-        fuzzy_threshold -= 8
+    if(color == -1) {
+        color = pager
     }
-    weighted_fuzzy += run_weight[fuzzy_threshold+1]
 
-    split("0 0 0 0 0 0 0 0 0 "                  \
-          "0 0 0 0 0 0 1 2 "                    \
-          "3 4 5 6 8 10 12 14 "                 \
-          "16 20 24 28 32 50 74 112 ",
-          entropy_weight,
-          " ")
-
+    DIFF = find_util("diff","DIFFPROG")
+    if(pager){
+        LESS = find_util("less","PAGER")" -R -F -M"
+        PROCINFO["NONFATAL"]=1
+    }
     if (color) {
         color_address_base = "\033[0;4m"
         color_address_diff = "\033[0;1;4m"
@@ -816,48 +962,105 @@ BEGIN {
         color_bytes_changed=""
         color_off=""
     }
-    od_cmd="od -Anone -tx1 -w4 -v --"
+    # Convert binary input to undecorated hexadecimal ASCII.
+    # This outputs a line per word, however each line consists of the
+    # current word and the previous match_words_max-1 words as well.
+    # This way we match on multiple words but with granularity.
+    textify_cmd="LC_ALL=C /usr/bin/awk '                                \
+        BEGIN {\n                                                       \
+            BINMODE = 3\n                                               \
+            RS = \"[\\0-\\xff]{4}\"\n                                   \
+            for(i=0;i<256;i++){\n                                       \
+                f=sprintf(\"%c\",i)\n                                   \
+                t=sprintf(\"%02x\",i)\n                                 \
+                tohex[f]=t\n                                            \
+            }\n                                                         \
+        }\n                                                             \
+        {\n                                                             \
+            word = \"\"tohex[substr(RT,1,1)]\n                          \
+            for(i=2;i<=8;i++) word = word\"\"tohex[substr(RT,i,1)]\n    \
+            line = \"w\"word\"\"substr(line,1,"match_words_max"*9-9)\n  \
+            print line\n                                                \
+        }'"
     diff_cmd="diff "                                                    \
-        minimal                                                         \
         "--old-line-format=$'< %l\n' "                                  \
         "--new-line-format=$'> %l\n' "                                  \
         "--unchanged-line-format=$'= %l\n' "                            \
         "-- "                                                           \
-        "<("od_cmd" "fileA") "                                          \
-        "<("od_cmd" "fileB") "                                          \
-
+        "<("textify_cmd" \""fileA"\") "                                 \
+        "<("textify_cmd" \""fileB"\") "
     output_maps()
-    while(diff_cmd | getline){
+    out("")
+    while(!ERRNO && (diff_cmd | getline) > 0){
+        line = $2
         if ($1=="="){
-            line = tobinary($2" "$3" "$4" "$5)
-            if(new_count>0 || old_count>0) {
-                print_stored_diff()
-            }
-            if(context_count<0){
-                # running out post-context
-                print_line(tohex(line), " ", tohex(line) )
-            } else {
-                # saving up pre-context
-                for(i=context_count;i>0;i--) {
-                    context_line[i]=context_line[i-1]
-                }
-                context_line[0] = tohex(line)
-            }
-            old_cursor+=4
-            new_cursor+=4
-            if( context_count < context) {
-                context_count++
-            }
+            push_old(line)
+            push_new(line)
+            strong_split(old_count, new_count)
         } else if ($1=="<") {
-            line = tobinary($2" "$3" "$4" "$5)
-            old_line[old_count++]=line
-            old_cursor+=4
+            push_old(line)
         } else if ($1==">") {
-            line = tobinary($2" "$3" "$4" "$5)
-            new_line[new_count++]=line
-            new_cursor+=4
+            push_new(line)
         }
     }
-    if(new_count>0 || old_count>0) print_stored_diff()
-    if(!near_beginning) print_end()
- }
+    diff_eof = 1
+    # flush each stage of the diff handling pipeline
+    strong_split(old_count, new_count)
+    output_split(old_count, new_count)
+    flush_consolidation()
+    print_end()
+    close("/dev/stdout")
+}
+
+############################ diff32 gawk script ends ############################
+#EOF
+############################ back to the bash wrapper ###########################
+
+_interrupt() {
+  # Immediate kill 0 won't do what we want; it kills us too.
+  # The pager must fully exit first.
+  kill -INT $pager_pid
+  wait $pager_pid
+  # now kill 0 will do what we want
+  kill -TERM 0
+}
+
+# test for interactive terminal
+[[ ! -t 1 ]]
+use_pager=$?
+
+# allow user to override default
+# scan arguments without clobbering them
+args=( "$@" )
+while test $# -gt 0
+do
+    case "$1" in
+        -p|--pager)
+          use_pager=1
+            ;;
+        -n|--no-pager)
+          use_pager=0
+            ;;
+    esac
+    shift
+done
+
+if [ $use_pager == 1 ]; then
+  ####################### pager case ############################
+  # exec script, get output fd and pid.
+  exec {diff32_fd}< <(awk -f - -- "${args[@]}" <&$script_fd) ; script_pid=$!
+  # Trap interrupts before starting pager.
+  trap _interrupt INT
+  # Connect pager to script, get pager fd.
+  less -R -K -M -X <&$diff32_fd & pager_pid=$!
+  # Gate on the pager.
+  wait $pager_pid
+  # Allow an emergency ^C to bail from cleanup gone wrong.
+  pager_pid=0
+  # Wait, but allow hard ^C if needed.
+  wait
+else
+  ##################### non-pager case ##########################
+  # run script.
+  awk -f - -- "${args[@]}" <&$script_fd
+fi
