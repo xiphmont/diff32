@@ -19,27 +19,13 @@ exec {script_fd}<<'#EOF'
 #!/usr/bin/awk -E   # Unnecessary, seems clearer to include it.
 
 # Program data output
-function out(string,
-             ret){
-    if (pager) {
-        printf string | LESS
-    } else {
-        printf string
-    }
+function out(string){
+    printf string
 }
 
-# Error/console output
+# Program error output
 function err(string){
-    if (use_stdout) {
-        out(string)
-    } else {
-        print string > out_dev
-    }
-}
-
-# Redirect where console messages are going.
-function err_redirect(dev){
-    out_dev = dev
+    print string > err_dev
 }
 
 # Change ANSI escape color; tracks current color so that
@@ -178,16 +164,6 @@ function format_word(line){
     }
 }
 
-function flush_consolidation(){
-
-
-}
-
-function consolidate_words(old_word, new_word){
-    print_words(old_word, new_word)
-
-}
-
 # Toplevel for line-by-line output handling; manages context, address
 # output and line formatting
 function submit_line(old_line, new_line,
@@ -195,9 +171,6 @@ function submit_line(old_line, new_line,
     old_word = format_word(old_line)
     new_word = format_word(new_line)
     if(old_word == new_word){
-        # context and identical lines are not consolidated or redacted,
-        # but we may need to flush existing consolidation
-        flush_consolidation()
         # push the line into context or print it?
         if(context_count<0){
             # running out post-context, so print
@@ -234,8 +207,8 @@ function submit_line(old_line, new_line,
         }
         # Mark need for trailing context before starting a new address block
         context_count= -context
-        # Consolidate words, flush/print when needed
-        consolidate_words(old_word, new_word)
+        # Flush/print as needed
+        print_words(old_word, new_word)
     }
 }
 
@@ -488,10 +461,12 @@ function strong_split(old_end, new_end,
     }
 }
 
-function stdout_usage(){
-    err_redirect("/dev/stdout")
+function stdout_usage(\
+                      save_dev){
+    save_dev=err_dev
+    err_dev="/dev/stdout"
     usage()
-    err_redirect("/dev/stderr")
+    err_dev=save_dev
 }
 
 function usage(){
@@ -838,10 +813,9 @@ function getopts(argc, argv,
                         opterr("Map option takes one to three comma-separated arguments.")
                     }
                     add_map(argument[1],argument[2],argument[3])
-                } else if (option == "n" || option == "no-pager") {
-                    pager = 0
-                } else if (option == "p" || option == "pager") {
-                    pager = 1
+                } else if (option == "n" || option == "no-pager" ||
+                           option == "p" || option == "pager") {
+                    # dummy; handled by the shell wrapper
                 } else if (option == "s" || option == "swap-endian") {
                     swap = 1
                 } else if (option == "v" || option == "version") {
@@ -892,14 +866,10 @@ function output_maps(\
     if(address_maps) out("\n")
 }
 
-function is_stdout_a_tty() {
-    return system("[[ ! -t 1 ]]")
-}
-
 function find_util(path, envvar,
                    cmd){
     if(ENVIRON[envvar])path = ENVIRON[envvar]
-    cmd = "which "path
+    cmd = "command -v "path
     cmd|getline
     close(cmd)
     if(!$0) err("diff32: Can't find '"path"' utility in the path.")
@@ -909,14 +879,13 @@ function find_util(path, envvar,
 BEGIN {
     # arguments
     context = 3
-    color = -1
+    color = 0
     minimal = ""
     swap = 0
     embargo = 0
     match_words_min = 2
     match_words_max = 8
     horizon = 32
-    pager = 0
 
     # global state variables
     old_cursor=0
@@ -930,21 +899,13 @@ BEGIN {
     context_count=0
     near_beginning=1
     address_maps=0
-    out_dev="/dev/stderr"
-
-#    if(is_stdout_a_tty()){
-#        pager = 1
-#    }
-    getopts(ARGC, ARGV)
-    if(color == -1) {
-        color = pager
-    }
+    err_dev="/dev/stderr"
 
     DIFF = find_util("diff","DIFFPROG")
-    if(pager){
-        LESS = find_util("less","PAGER")" -R -F -M"
-        PROCINFO["NONFATAL"]=1
-    }
+    LESS = find_util("less","PAGER")
+
+    getopts(ARGC, ARGV)
+
     if (color) {
         color_address_base = "\033[0;4m"
         color_address_diff = "\033[0;1;4m"
@@ -982,7 +943,7 @@ BEGIN {
             line = \"w\"word\"\"substr(line,1,"match_words_max"*9-9)\n  \
             print line\n                                                \
         }'"
-    diff_cmd="diff "                                                    \
+    diff_cmd=DIFF" "                                                    \
         "--old-line-format=$'< %l\n' "                                  \
         "--new-line-format=$'> %l\n' "                                  \
         "--unchanged-line-format=$'= %l\n' "                            \
@@ -1007,8 +968,8 @@ BEGIN {
     # flush each stage of the diff handling pipeline
     strong_split(old_count, new_count)
     output_split(old_count, new_count)
-    flush_consolidation()
     print_end()
+    close(diff_cmd)
     close("/dev/stdout")
 }
 
@@ -1025,12 +986,23 @@ _interrupt() {
   kill -TERM 0
 }
 
-# test for interactive terminal
-[[ ! -t 1 ]]
+# default pager utility and options if not locally set
+if [ -z "${PAGER}" ]; then
+  export PAGER="less -R -K -M -X"
+fi
+
+# default diff utility and options if not locally set
+if [ -z "${DIFFPROG}" ]; then
+  export DIFFPROG="diff"
+fi
+
+# Test for interactive terminal and pager executable;
+# if both present, default to using the configured pager.
+[[ ! ( -t 1 && -x $(command -v $PAGER)) ]]
 use_pager=$?
 
-# allow user to override default
-# scan arguments without clobbering them
+# Allow user to override default pager use.
+# Scan arguments without clobbering them.
 args=( "$@" )
 while test $# -gt 0
 do
@@ -1038,7 +1010,7 @@ do
         -p|--pager)
           use_pager=1
             ;;
-        -n|--no-pager)
+        -n|--no-pager|-v|--version|-h|--help)
           use_pager=0
             ;;
     esac
@@ -1048,17 +1020,18 @@ done
 if [ $use_pager == 1 ]; then
   ####################### pager case ############################
   # exec script, get output fd and pid.
-  exec {diff32_fd}< <(awk -f - -- "${args[@]}" <&$script_fd) ; script_pid=$!
+  exec {diff32_fd}< <(awk -f - -- "--color" "${args[@]}" <&$script_fd) ; script_pid=$!
   # Trap interrupts before starting pager.
   trap _interrupt INT
   # Connect pager to script, get pager fd.
-  less -R -K -M -X <&$diff32_fd & pager_pid=$!
+  $PAGER $PAGER_ARGS <&$diff32_fd & pager_pid=$!
   # Gate on the pager.
   wait $pager_pid
-  # Allow an emergency ^C to bail from cleanup gone wrong.
-  pager_pid=0
-  # Wait, but allow hard ^C if needed.
-  wait
+  # Done. Issue a kill to clean up children if pager quit before
+  # diffing completed, and script didn't notice for some reason
+  # (it should have, but might be stuck for some other reason).
+  trap '' INT
+  kill -INT 0
 else
   ##################### non-pager case ##########################
   # run script.
