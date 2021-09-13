@@ -988,7 +988,7 @@ _interrupt() {
 
 # default pager utility and options if not locally set
 if [ -z "${PAGER}" ]; then
-  export PAGER="less -R -K -M -X"
+  export PAGER="less -R -K -M -X -F"
 fi
 
 # default diff utility and options if not locally set
