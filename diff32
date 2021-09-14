@@ -29,7 +29,7 @@ function err(string){
 }
 
 # Change ANSI escape color; tracks current color so that
-# repeated settings to the same color aren't output.
+# repeated settings to the same color get collapsed.
 function change_color(color){
     if (current_color != color) out(color)
     current_color = color
@@ -43,6 +43,12 @@ function change_color(color){
 # differences.
 function out_highlight(to_print, to_compare, off_color, on_color, lock,
                        current, a, b, i){
+    if (to_print == "") {
+        to_print = "           "
+    }
+    if (to_compare == ""){
+        to_compare = "           "
+    }
     change_color(off_color)
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
@@ -57,6 +63,8 @@ function out_highlight(to_print, to_compare, off_color, on_color, lock,
     change_color(off_color)
 }
 
+# Run an absolute address offset from beginning-of-file through
+# the user-supplied maps to arrive at a display address.
 function map_an_address(addr,
                         i){
     for (i=0; i<address_maps; i++) {
@@ -68,7 +76,7 @@ function map_an_address(addr,
     return addr
 }
 
-# print an address header at the beginning of a new block of differences.
+# Print an address header at the beginning of a new block of differences.
 function print_address(old, new,
                        old_str, new_str, old_map, new_map, bar, base, diff){
 
@@ -87,6 +95,8 @@ function print_address(old, new,
         base = color_unchanged
         diff = color_unchanged
     }
+    if (hunks) out("\n")
+    hunks++
     out(bar)
     change_color(base)
     out_highlight(old_str,new_str,base,diff,1);
@@ -112,36 +122,36 @@ function print_address(old, new,
     }
 }
 
-# print one line of a diff block
+# Print one line of a diff block.  Takes two words formatted for
+# display, optionally compares and applies highlights, adds the status
+# indicator ('<' and/or '>') and prints.
 function print_words(old_word, new_word,
                     c, ccolor) {
     if(old_word == new_word){
         change_color(color_unchanged)
-        out(sprintf(" %s  %s  %s\n", old_word, " ", new_word))
+        out(sprintf(" %s     %s\n", old_word, new_word))
         change_color(color_off)
         old_cursor++
         new_cursor++
     } else {
-        c = "!"
-        ccolor = color_bytes_unchanged
+        out(" ")
+        out_highlight(old_word,new_word,color_off,color_bytes_old,0)
+        c = "  !  "
+        ccolor = color_bytes_changed
         if (old_word == "") {
-            c = ">"
-            old_word = "           "
             ccolor = color_bytes_new
+            c = "  >  "
         } else {
             old_cursor++
         }
         if (new_word == ""){
-            c = "<"
-            new_word = "           "
             ccolor = color_bytes_old
+            c = "  <  "
         } else {
             new_cursor++
         }
-        out(" ")
-        out_highlight(old_word,new_word,color_off,color_bytes_old,0)
         change_color(ccolor)
-        out(sprintf("  %s  ", c))
+        out(c)
         change_color(color_off)
         out_highlight(new_word,old_word,color_off,color_bytes_new,0);
         out("\n")
@@ -152,6 +162,8 @@ function print_end(){
     out("\n ----------- END ----------- \n")
 }
 
+# Takes a line of input in the original packed/overlapping input
+# formatting, and returns a 4-byte word formatted for printing.
 function format_word(line){
     if(line == ""){
         return line
@@ -189,17 +201,17 @@ function submit_line(old_line, new_line,
                 # print address cursors
                 old_cursor++
                 new_cursor++
+                new_block=1
             }
         }
     } else {
         # Do we need to print an address header?
-        if (context_count >= context || near_beginning) {
+        if (new_block) {
             # Yes. post-context has run out, or we're at/near
             # beginning of file.  Skip a line for visual break and
             # print an address header.
-            if (!near_beginning) out("\n")
             print_address(old_cursor*4, new_cursor*4)
-            near_beginning=0
+            new_block=0
         }
         # Print any pending pre-context
         for(i=context_count;i>0;i--) {
@@ -209,6 +221,40 @@ function submit_line(old_line, new_line,
         context_count= -context
         # Flush/print as needed
         print_words(old_word, new_word)
+    }
+}
+
+# Variant of the above for redacted output.
+function redact_lines(num_lines,
+                      i){
+    if(num_lines > 0){
+        # Do we need to print an address header?
+        if (new_block) {
+            # Yes. post-context has run out, or we're at/near
+            # beginning of file.  Skip a line for visual break and
+            # print an address header.
+            print_address(old_cursor*4, new_cursor*4)
+            new_block=0
+        }
+        # Print any pending pre-context
+        for(i=context_count;i>0;i--) {
+            print_words(context_word[i-1],context_word[i-1])
+        }
+        # Mark need for trailing context before starting a new address block
+        context_count= -context
+        # output redaction
+
+        out(" ")
+        change_color(color_bytes_old)
+        out(".. .. .. .. <<< ")
+        change_color(color_off)
+        if(num_lines==1){
+            out("1 line")
+        }else{
+            out(sprintf("%d lines", num_lines))
+        }
+        out("\n")
+        old_cursor+=num_lines
     }
 }
 
@@ -265,12 +311,23 @@ function output_split(old_end, new_end,
         new_pos--
     }
 
-    for(i=0; i<old_pos && i<new_pos; i++)
-        submit_line(old_line[i], new_line[i])
-    for(j=i; j<old_pos; j++)
-        submit_line(old_line[j],"")
-    for(j=i; j<new_pos; j++)
-        submit_line("",new_line[j])
+    # When redacting input, we only worry about the mid lines of the
+    # split.  Initial leading exact matches are stripped away by
+    # forward match.  We shouldn't have any trailing exact matches at
+    # the bottom of the split, because context is normally 0.  If
+    # context is not 0 then that's a user override, so don't redact it.
+    if (redact) {
+        redact_lines(old_pos)
+        for(j=0; j<new_pos; j++)
+            submit_line("",new_line[j])
+    } else {
+        for(i=0; i<old_pos && i<new_pos; i++)
+            submit_line(old_line[i], new_line[i])
+        for(j=i; j<old_pos; j++)
+            submit_line(old_line[j],"")
+        for(j=i; j<new_pos; j++)
+            submit_line("",new_line[j])
+    }
 
     # now push the exact bottom matches
     while(old_pos<old_end && new_pos<new_end){
@@ -398,7 +455,7 @@ function weak_split(old_end, new_end, threshold,
     }
 }
 
-# Successively break up initial region by exact matches searched by
+# Successively break up initial region into exact matches searched by
 # increasing offset.
 function strong_split(old_end, new_end,
                       i, j, pos){
@@ -459,127 +516,6 @@ function strong_split(old_end, new_end,
         old_end -= pos["old"]
         new_end -= pos["new"]
     }
-}
-
-function stdout_usage(\
-                      save_dev){
-    save_dev=err_dev
-    err_dev="/dev/stdout"
-    usage()
-    err_dev=save_dev
-}
-
-function usage(){
-    err("")
-    err("diff32 : A 'diff'-style comparison tool for raw 32 bit binaries")
-    err("")
-    err("USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin")
-    err("")
-    err("OPTIONS:")
-    err("")
-    err("  -c, --context=NUM")
-    err("")
-    err("     Include NUM lines of copied context before and after changes.")
-    err("     Minimum value is 0, maximum is 16.  Default is 3.")
-    err("")
-    err("  -d, --minimal")
-    err("")
-    err("     Try hard to find a smaller set of changes.")
-    err("")
-    err("  -e, --embargo-deletion")
-    err("")
-    err("     Emit deletions as placeholders indicating the number of words")
-    err("     omitted from fileA. Emit line changes (ie, ! lines) with words")
-    err("     from fileA obscured. Context is set to zero, but may be over-")
-    err("     ridden by following with -c LINES.  Embargo is intended to")
-    err("     minimize the amount of fileA included in output.")
-    err("")
-    err("  -h, --help")
-    err("")
-    err("     Output this help message and exit.")
-    err("")
-    err("  -l, --minimum-match-length=NUM")
-    err("")
-    err("     Sets the minimum length in words of a match when performing")
-    err("     subdivision of large regions.  NUM may be 1 through 32 (default")
-    err("     is 2 lines/words) and must be less than or equal to the initial")
-    err("     match length.")
-    err("")
-    err("  -L, --initial-match-length=NUM")
-    err("")
-    err("     Sets the required match length in words when doing initial")
-    err("     matching of large regions. NUM may be 1 through 32 (default")
-    err("     is 8 lines/words) and must be greater than or equal to the")
-    err("     minimum match length.")
-    err("")
-    err("  -m, --map=DESTINATION[,SOURCE[,LENGTH]]")
-    err("")
-    err("     Map displayed input byte range of LENGTH bytes starting at")
-    err("     SOURCE byte offset to the range beginning at DESTINATION.  -m")
-    err("     only affects displayed addresses, not match or output order.")
-    err("     Omitting LENGTH extends range to the end of the file.  Omitting")
-    err("     both SOURCE and LENGTH maps the entire input. More than one")
-    err("     range may be specified. Later overlapping input ranges override")
-    err("     earlier ranges. Final destination ranges may not overlap. Values")
-    err("     may be decimal, octal (leading 0) or hexadecimal (leading 0x).")
-    err("")
-    err("  -n, --no-pager")
-    err("")
-    err("  -p, --pager")
-    err("")
-    err("  -s, --swap-endian")
-    err("")
-    err("     diff32 normally presents bytes in as-read order. -s instructs")
-    err("     diff32 to swap the order it prints bytes on each line. -s has")
-    err("     no effect on matching as matching is endian-agnostic.")
-    err("")
-    err("  -v, --version")
-    err("")
-    err("     Output version and exit.")
-    err("")
-    err("  -z, --extend-horizon=NUM")
-    err("")
-    err("     Add NUM additional words to the computed lookahead horizon when")
-    err("     searching for initial matches with the lowest possible offsets.")
-    err("     NUM may be between zero (disabling lookahead) and 4096. Higher")
-    err("     values may produce better output at the cost of greatly increased")
-    err("     computation time.  The default value is 32.")
-    err("")
-    err("  --color")
-    err("")
-    err("     Colorize the output.")
-    err("")
-    err("  --no-color")
-    err("")
-    err("     Do not colorize the output.")
-    err("")
-    err("DETAILS:")
-    err("")
-    err("     diff32 is an awk script that wraps the standard diff utility")
-    err("     to produce a human-readable side-by-side text summary of")
-    err("     differences between two raw 32-bit binary files. diff32 ")
-    err("     searches for changes, insertions, and deletions.")
-    err("")
-    err("EXAMPLE:")
-    err("")
-    err("  diff32 -d --color mips_binary1.bin mips_binary2.bin | less -R")
-    err("")
-    err("     Produce a colorized summary of the differences in binary files")
-    err("     mips_binary1.bin and mips_binary2.bin, presented on the terminal")
-    err("     one page at a time using the 'less' utility. The -d option to")
-    err("     diff32 requests extra time be spent to minimize the change")
-    err("     set. The -R option instructs less to allow ANSI color codes.")
-    err("")
-    err("AUTHOR:")
-    err("")
-    err("     Written by Monty Montgomery <monty@xiph.org>")
-    err("     This is free software: you are free to change and redistribute")
-    err("     it.  There is NO WARRANTY, to the extent permitted by law.")
-    err("")
-    err("SEE ALSO:")
-    err("")
-    err("  diff(1), cmp(1), xdelta(1), awk(1)")
-    err("")
 }
 
 function list_map_error(i, j,
@@ -713,6 +649,127 @@ function add_map(dst, src, len,
     }
 }
 
+function stdout_usage(\
+                      save_dev){
+    save_dev=err_dev
+    err_dev="/dev/stdout"
+    usage()
+    err_dev=save_dev
+}
+
+function usage(){
+    err("")
+    err("diff32 : A 'diff'-style comparison tool for raw 32 bit binaries")
+    err("")
+    err("USAGE  : diff32 [OPTIONS] fileA.bin fileB.bin")
+    err("")
+    err("OPTIONS:")
+    err("")
+    err("  -c, --context=NUM")
+    err("")
+    err("     Include NUM lines of copied context before and after changes.")
+    err("     Minimum value is 0, maximum is 16.  Default is 3.")
+    err("")
+    err("  -d, --minimal")
+    err("")
+    err("     Try hard to find a smaller set of changes.")
+    err("")
+    err("  -h, --help")
+    err("")
+    err("     Output this help message and exit.")
+    err("")
+    err("  -l, --minimum-match-length=NUM")
+    err("")
+    err("     Sets the minimum length in words of a match when performing")
+    err("     subdivision of large regions.  NUM may be 1 through 32 (default")
+    err("     is 2 lines/words) and must be less than or equal to the initial")
+    err("     match length.")
+    err("")
+    err("  -L, --initial-match-length=NUM")
+    err("")
+    err("     Sets the required match length in words when doing initial")
+    err("     matching of large regions. NUM may be 1 through 32 (default")
+    err("     is 8 lines/words) and must be greater than or equal to the")
+    err("     minimum match length.")
+    err("")
+    err("  -m, --map=DESTINATION[,SOURCE[,LENGTH]]")
+    err("")
+    err("     Map displayed input byte range of LENGTH bytes starting at")
+    err("     SOURCE byte offset to the range beginning at DESTINATION.  -m")
+    err("     only affects displayed addresses, not match or output order.")
+    err("     Omitting LENGTH extends range to the end of the file.  Omitting")
+    err("     both SOURCE and LENGTH maps the entire input. More than one")
+    err("     range may be specified. Later overlapping input ranges override")
+    err("     earlier ranges. Final destination ranges may not overlap. Values")
+    err("     may be decimal, octal (leading 0) or hexadecimal (leading 0x).")
+    err("")
+    err("  -n, --no-pager")
+    err("")
+    err("  -p, --pager")
+    err("")
+    err("  -r, --redact-original")
+    err("")
+    err("     Redact fileA's words from the diff32 output. Emit all changes")
+    err("     as block deletions from fileA, marked '[redacted]', followed")
+    err("     by insertions from fileB. Context is set to zero, but may be over-")
+    err("     ridden by following with -c LINES.  Embargo is intended to")
+    err("     minimize the amount of fileA included in output.")
+    err("")
+    err("  -s, --swap-endian")
+    err("")
+    err("     diff32 normally presents bytes in as-read order. -s instructs")
+    err("     diff32 to swap the order it prints bytes on each line. -s has")
+    err("     no effect on matching as matching is endian-agnostic.")
+    err("")
+    err("  -v, --version")
+    err("")
+    err("     Output version and exit.")
+    err("")
+    err("  -z, --extend-horizon=NUM")
+    err("")
+    err("     Add NUM additional words to the computed lookahead horizon when")
+    err("     searching for initial matches with the lowest possible offsets.")
+    err("     NUM may be between zero (disabling lookahead) and 4096. Higher")
+    err("     values may produce better output at the cost of greatly increased")
+    err("     computation time.  The default value is 32.")
+    err("")
+    err("  --color")
+    err("")
+    err("     Colorize the output.  Default behavior when using a pager.")
+    err("")
+    err("  --no-color")
+    err("")
+    err("     Do not colorize the output.")
+    err("")
+    err("DETAILS:")
+    err("")
+    err("     diff32 is an awk script that wraps the standard diff utility")
+    err("     to produce a human-readable side-by-side text summary of")
+    err("     differences between two raw 32-bit binary files. diff32 ")
+    err("     searches for changes, insertions, and deletions.")
+    err("")
+    err("EXAMPLE:")
+    err("")
+    err("  diff32 mips_binary1.bin mips_binary2.bin")
+    err("")
+    err("     Produce a colorized summary of the differences in binary files")
+    err("     mips_binary1.bin and mips_binary2.bin, presented on the terminal")
+    err("     one page at a time using the 'less' utility. The -d option to")
+    err("     diff32 requests extra time be spent to minimize the change")
+    err("     set. The -R option instructs less to allow ANSI color codes.")
+    err("")
+    err("AUTHOR:")
+    err("")
+    err("     Written by Monty Montgomery <monty@xiph.org>")
+    err("     This is free software: you are free to change and redistribute")
+    err("     it.  There is NO WARRANTY, to the extent permitted by law.")
+    err("")
+    err("SEE ALSO:")
+    err("")
+    err("  diff(1), cmp(1), xdelta(1), awk(1)")
+    err("")
+}
+
 function version () {
     out("\n")
     out("diff32 version 0.0.3\n")
@@ -786,8 +843,8 @@ function getopts(argc, argv,
                     }
                 } else if (option == "d" || option == "minimal") {
                     minimal = "-d "
-                } else if (option == "e" || option == "embargo-deletion") {
-                    embargo = 1
+                } else if (option == "r" || option == "redact-original") {
+                    redact = 1
                     context = 0
                 } else if (option == "l" || option == "minimum-match-length") {
                     if (argument[1] == "" || argument[2] != "") {
@@ -882,7 +939,7 @@ BEGIN {
     color = 0
     minimal = ""
     swap = 0
-    embargo = 0
+    redact = 0
     match_words_min = 2
     match_words_max = 8
     horizon = 32
@@ -897,7 +954,8 @@ BEGIN {
     advance_active=0
     diff_eof=0
     context_count=0
-    near_beginning=1
+    new_block=1
+    hunks=0
     address_maps=0
     err_dev="/dev/stderr"
 
