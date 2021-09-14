@@ -18,21 +18,19 @@ exec {script_fd}<<'#EOF'
 ############################### diff32 gawk script ##############################
 #!/usr/bin/awk -E   # Unnecessary, seems clearer to include it.
 
-# Program data output
-function out(string){
+# Program data output.  Optionally changes ANSI escape color/attribute
+# set; tracks current color so that repeated settings to the same
+# color get collapsed.
+function out(string, attribute){
+    if (!attribute) attribute = attributes_off
+    if (current_attribute != attribute) printf(attribute)
+    current_attribute = attribute
     printf string
 }
 
 # Program error output
 function err(string){
     printf string > err_dev
-}
-
-# Change ANSI escape color; tracks current color so that
-# repeated settings to the same color get collapsed.
-function change_color(color){
-    if (current_color != color) out(color)
-    current_color = color
 }
 
 # helper function to print the input, optionally colorizing the
@@ -42,25 +40,24 @@ function change_color(color){
 # the string regardless of match; this is used to highlight address
 # differences.
 function out_highlight(to_print, to_compare, off_color, on_color, lock,
-                       current, a, b, i){
+                       current, a, b, c, i){
     if (to_print == "") {
         to_print = "           "
     }
     if (to_compare == ""){
         to_compare = "           "
     }
-    change_color(off_color)
+    c=off_color
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
         b = substr(to_compare,i,1)
         if (a != b){
-            change_color(on_color)
+            c=on_color
         } else {
-            if (!lock) change_color(off_color)
+            if (!lock) c=off_color
         }
-        out(a)
+        out(a,c)
     }
-    change_color(off_color)
 }
 
 # Run an absolute address offset from beginning-of-file through
@@ -78,7 +75,7 @@ function map_an_address(addr,
 
 # Print an address header at the beginning of a new block of differences.
 function print_address(old, new,
-                       old_str, new_str, old_map, new_map, bar, base, diff){
+                       old_str, new_str, old_map, new_map){
 
     # mapping is purely a cosmetic addition, so it's handled on-demand here
     old_map = map_an_address(old)
@@ -86,38 +83,32 @@ function print_address(old, new,
     old_str = sprintf("0x%08x",old)
     new_str = sprintf("0x%08x",new)
 
-    bar = " "
-    if (old == old_map && new == new_map){
-        if(!color) bar = "_"
-        base = color_address_base
-        diff = color_address_diff
-    } else {
-        base = color_unchanged
-        diff = color_unchanged
-    }
     if (hunks) out("\n")
     hunks++
-    out(bar)
-    change_color(base)
-    out_highlight(old_str,new_str,base,diff,1);
-    out(bar""bar""bar""bar""bar""bar""bar)
-    out_highlight(new_str,old_str,base,diff,1);
-    change_color(color_off)
-    out(bar"\n")
 
-    if (old != old_map || new != new_map){
+    if (old == old_map && new == new_map){
+        out(" ",color_bar)
+        out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
+        out(" ----- ",color_bar)
+        out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
+        out(" ", color_bar)
+        out("\n")
+    } else {
+        out(" ")
+        out_highlight(old_str,new_str,attributes_off,attributes_off,1);
+        out("       ")
+        out_highlight(new_str,old_str,attributes_off,attributes_off,1);
+        out(" \n")
+
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
-        base = color_address_base
-        diff = color_address_diff
-        if(!color) bar = "_"
 
         out("[")
-        change_color(base)
-        out_highlight(old_str,new_str,base,diff,1);
-        out(bar""bar"MAP"bar""bar)
-        out_highlight(new_str,old_str,base,diff,1);
-        change_color(color_off)
+        out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
+        out(" -", color_bar)
+        out("MAP", color_address_base)
+        out("- ", color_bar)
+        out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
         out("]\n")
     }
 }
@@ -128,32 +119,30 @@ function print_address(old, new,
 function print_words(old_word, new_word,
                     c, ccolor) {
     if(old_word == new_word){
-        change_color(color_unchanged)
-        out(sprintf(" %s     %s\n", old_word, new_word))
-        change_color(color_off)
+        out(sprintf(" %s     %s", old_word, new_word), color_bytes_unchanged)
+        out("\n") # split out from above so that it resets attributes
+                  # at the end of the line
         old_cursor++
         new_cursor++
     } else {
         out(" ")
-        out_highlight(old_word,new_word,color_off,color_bytes_old,0)
+        out_highlight(old_word,new_word,attributes_off,color_bytes_oldchanged,0)
         c = "  !  "
         ccolor = color_bytes_changed
         if (old_word == "") {
-            ccolor = color_bytes_new
+            ccolor = color_bytes_newchanged
             c = "  >  "
         } else {
             old_cursor++
         }
         if (new_word == ""){
-            ccolor = color_bytes_old
+            ccolor = color_bytes_oldchanged
             c = "  <  "
         } else {
             new_cursor++
         }
-        change_color(ccolor)
-        out(c)
-        change_color(color_off)
-        out_highlight(new_word,old_word,color_off,color_bytes_new,0);
+        out(c,ccolor)
+        out_highlight(new_word,old_word,attributes_off,color_bytes_newchanged,0);
         out("\n")
     }
 }
@@ -245,9 +234,7 @@ function redact_lines(num_lines,
         # output redaction
 
         out(" ")
-        change_color(color_bytes_old)
-        out(".. .. .. .. <<< ")
-        change_color(color_off)
+        out(".. .. .. .. <<< ",color_bytes_oldchanged)
         if(num_lines==1){
             out("1 line")
         }else{
@@ -649,6 +636,80 @@ function add_map(dst, src, len,
     }
 }
 
+function setup_color() {
+    # fetch terminal info if we can
+    INFOCMP = find_util("infocmp", "INFOCMP", 0)
+    if(INFOCMP){
+        RS="^$"
+        if (INFOCMP" -0" | getline) {
+            term = $0
+        }
+        close(INFOCMP" -0")
+        RS="\n"
+    }
+    if (term ~ /colors/) {
+        # is underline available?
+        # is invisible mode available?
+        if (term ~ /smul=/ && term ~ /invis=/) {
+            # Invis means we can hide the '---' separators, so make
+            # things prettier with an underline.
+            color_bar = "\033[0;8;4m"
+            color_address_base = "\033[0;4m"
+            # is bold or rev available?
+            if (term ~ /bold=/) {
+                color_address_diff = "\033[0;1;4m"
+            } else if (term ~ /rev=/) {
+                color_address_diff = "\033[0;7;4m"
+            } else {
+                color_address_diff = "\033[0;4m"
+            }
+        }else{
+            # can't hide the ---, so don't use underlines.
+            color_bar = "\033[0m"
+            color_address_base = "\033[0m"
+            # is bold or rev available?
+            if (term ~ /bold=/) {
+                color_address_diff = "\033[0;1m"
+            } else if (term ~ /rev=/) {
+                color_address_diff = "\033[0;7m"
+            } else {
+                color_address_diff = "\033[0m"
+            }
+        }
+        # is dim available?
+        if (term ~ /dim=/) {
+            color_address_deemph = "\033[0;2m"
+            color_bytes_unchanged = "\033[0;2m"
+        }else{
+            color_address_deemph = "\033[0m"
+            color_bytes_unchanged = "\033[0m"
+        }
+        # can we bold bright color changes?
+        if (term ~ /bold=/) {
+            color_bytes_oldchanged = "\033[0;31;1m"
+            color_bytes_newchanged = "\033[0;32;1m"
+            color_bytes_changed = "\033[0;1m"
+        }else{
+            color_bytes_oldchanged = "\033[0;31m"
+            color_bytes_newchanged = "\033[0;32m"
+            color_bytes_changed = "\033[0m"
+        }
+        attributes_off = "\033[0m"
+    }
+}
+
+function disable_color(){
+    color_address_base=""
+    color_address_diff=""
+    color_address_deemph=""
+    color_bytes_unchanged=""
+    color_bytes_oldchanged=""
+    color_bytes_newchanged=""
+    color_bytes_changed=""
+    color_bar=""
+    attributes_off=""
+}
+
 function stdout_usage(\
                       save_dev){
     save_dev=err_dev
@@ -709,11 +770,11 @@ function usage(){
     err("")
     err("  -r, --redact-original")
     err("")
-    err("     Redact fileA's words from the diff32 output. Emit all changes")
-    err("     as block deletions from fileA, marked '[redacted]', followed")
+    err("     Redact fileA's words from the diff32 output by emitting changes")
+    err("     as block deletions from fileA marked '.. .. .. .. <<<', followed")
     err("     by insertions from fileB. Context is set to zero, but may be over-")
-    err("     ridden by following with -c LINES.  Embargo is intended to")
-    err("     minimize the amount of fileA included in output.")
+    err("     ridden by following with -c LINES.  Redaction is intended to")
+    err("     minimize the amount of information from fileA included in output.")
     err("")
     err("  -s, --swap-endian")
     err("")
@@ -887,7 +948,9 @@ function getopts(argc, argv,
                         opterr("Horizon argument must be in the range 0..4096.")
                     }
                 } else if (option == "color") {
-                    color = 1
+                    setup_color()
+                } else if (option == "no-color") {
+                    disable_color()
                 } else {
                     opterr("Unknown arguemnt on command line.")
                 }
@@ -916,27 +979,26 @@ function getopts(argc, argv,
 function output_maps(\
                      k){
     for(k=0; k < address_maps; k++) {
-        err(sprintf("MAP: 0x%08x -> 0x%08x\n",
+        out(sprintf("MAP: 0x%08x -> 0x%08x\n",
                     address_map_src[k],
                     address_map_dst[k]))
     }
     if(address_maps) out("\n")
 }
 
-function find_util(path, envvar,
+function find_util(path, envvar, report,
                    cmd){
     if(ENVIRON[envvar])path = ENVIRON[envvar]
     cmd = "command -v "path
     cmd|getline
     close(cmd)
-    if(!$0) err("diff32: Can't find '"path"' utility in the path.")
+    if(!$0 && report) err("diff32: Can't find '"path"' utility in the path.")
     return $0
 }
 
 BEGIN {
     # arguments
     context = 3
-    color = 0
     minimal = ""
     swap = 0
     redact = 0
@@ -959,28 +1021,10 @@ BEGIN {
     address_maps=0
     err_dev="/dev/stderr"
 
-    DIFF = find_util("diff","DIFFPROG")
-    LESS = find_util("less","PAGER")
-
+    DIFF = find_util("diff", "DIFFPROG", 1)
+    LESS = find_util("less", "PAGER", 1)
     getopts(ARGC, ARGV)
 
-    if (color) {
-        color_address_base = "\033[0;4m"
-        color_address_diff = "\033[0;1;4m"
-        color_unchanged = "\033[0;2m"
-        color_bytes_old = "\033[0;31;1m"
-        color_bytes_new = "\033[0;32;1m"
-        color_bytes_changed = "\033[0;1m"
-        color_off = "\033[0m"
-    } else {
-        color_address_base = ""
-        color_address_diff = ""
-        color_unchanged=""
-        color_bytes_old=""
-        color_bytes_new=""
-        color_bytes_changed=""
-        color_off=""
-    }
     # Convert binary input to undecorated hexadecimal ASCII.
     # This outputs a line per word, however each line consists of the
     # current word and the previous match_words_max-1 words as well.
