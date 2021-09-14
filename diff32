@@ -11,11 +11,11 @@
 # The wrapper also makes sure ^C really shuts down everything. If gawk gets hung
 # in a loop or due to a bug, it won't notice that stdout/stderr simply went away.
 # After the pager exits, the interrupt handler issues a kill 0.
+#################### bash script continues after gawk section ###################
 
 exec {script_fd}<<'#EOF'
 
-#################### bash script continues after gawk section ###################
-######################### diff32 gawk script begins here ########################
+############################### diff32 gawk script ##############################
 #!/usr/bin/awk -E   # Unnecessary, seems clearer to include it.
 
 # Program data output
@@ -25,7 +25,7 @@ function out(string){
 
 # Program error output
 function err(string){
-    print string > err_dev
+    printf string > err_dev
 }
 
 # Change ANSI escape color; tracks current color so that
