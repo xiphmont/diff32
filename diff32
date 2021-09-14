@@ -30,7 +30,7 @@ function out(string, attribute){
 
 # Program error output
 function err(string){
-    printf string > err_dev
+    print string > err_dev
 }
 
 # helper function to print the input, optionally colorizing the
@@ -847,10 +847,10 @@ function version () {
 }
 
 function opterr(msg){
-    err("\n")
-    err("diff32: "msg"\n")
-    err("        See man page or diff32 --help for more information.\n")
-    err("\n")
+    err("")
+    err("diff32: "msg"")
+    err("        See man page or diff32 --help for more information.")
+    err("")
     close("/dev/stdout")
     exit(1)
 }
