@@ -16,16 +16,46 @@
 exec {script_fd}<<'#EOF'
 
 ############################### diff32 gawk script ##############################
-#!/usr/bin/awk -E   # Unnecessary, seems clearer to include it.
+#!/usr/bin/gawk -E   # Unnecessary, seems clearer to include it.
 
-# Program data output.  Optionally changes ANSI escape color/attribute
-# set; tracks current color so that repeated settings to the same
-# color get collapsed.
-function out(string, attribute){
+# Line-buffered program data output.  This queues pieces of a line (or
+# lines really) to be explicitly flushed.  Optional argument sets the
+# passed ANSI escape attributes, but only if not already set to the
+# same string.
+function q(string, attribute){
+    if (output_q_lineready) q_flush()
     if (!attribute) attribute = attributes_off
-    if (current_attribute != attribute) printf(attribute)
-    current_attribute = attribute
-    printf string
+    if (current_q_attribute != attribute) {
+        output_q_buffer = output_q_buffer""attribute
+        current_q_attribute = attribute
+    }
+    output_q_buffer = output_q_buffer""string
+}
+
+# underlines the text present in the line buffer, assuming
+# terminal supports the operation. Cosmetic pretty-print.
+function q_underline(){
+    if(attribute_underline){
+        # quick and dirty; 'm' only occurs in output when in ANSI escapes
+        gsub("m",";4m",output_q_buffer)
+        output_q_buffer = "\033[4m"output_q_buffer
+    }
+}
+
+function q_line(){
+    if (output_q_lineready) q_flush()
+    if (current_q_attribute && current_q_attribute != attributes_off){
+        output_q_buffer = output_q_buffer""attributes_off
+        current_q_attribute = attributes_off
+    }
+    output_q_buffer = output_q_buffer"\n"
+    output_q_lineready = 1
+}
+
+function q_flush(){
+    printf output_q_buffer
+    output_q_lineready = 0
+    output_q_buffer = ""
 }
 
 # Program error output
@@ -51,12 +81,14 @@ function out_highlight(to_print, to_compare, off_color, on_color, lock,
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
         b = substr(to_compare,i,1)
-        if (a != b){
-            c=on_color
-        } else {
-            if (!lock) c=off_color
+        if(a != " "){
+            if (a != b){
+                c = on_color
+            } else {
+                if (!lock) c=off_color
+            }
         }
-        out(a,c)
+        q(a,c)
     }
 }
 
@@ -83,33 +115,36 @@ function print_address(old, new,
     old_str = sprintf("0x%08x",old)
     new_str = sprintf("0x%08x",new)
 
-    if (hunks) out("\n")
+    if (hunks){
+        q_underline()
+        q_line()
+    }
     hunks++
 
     if (old == old_map && new == new_map){
-        out(" ",color_bar)
+        q(" ",color_bar)
         out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
-        out(" ----- ",color_bar)
+        q(" ----- ",color_bar)
         out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
-        out(" ", color_bar)
-        out("\n")
+        q(" ", color_bar)
+        q_line()
     } else {
-        out(" ")
+        q(" ")
         out_highlight(old_str,new_str,attributes_off,attributes_off,1);
-        out("       ")
+        q("       ")
         out_highlight(new_str,old_str,attributes_off,attributes_off,1);
-        out(" \n")
+        q_line()
 
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
 
-        out("[")
+        q("[")
         out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
-        out(" -", color_bar)
-        out("MAP", color_address_base)
-        out("- ", color_bar)
+        q(" -", color_bar)
+        q("MAP", color_address_base)
+        q("- ", color_bar)
         out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
-        out("]\n")
+        q_line()
     }
 }
 
@@ -119,13 +154,12 @@ function print_address(old, new,
 function print_words(old_word, new_word,
                     c, ccolor) {
     if(old_word == new_word){
-        out(sprintf(" %s     %s", old_word, new_word), color_bytes_unchanged)
-        out("\n") # split out from above so that it resets attributes
-                  # at the end of the line
+        q(sprintf(" %s     %s ", old_word, new_word), color_bytes_unchanged)
+        q_line()
         old_cursor++
         new_cursor++
     } else {
-        out(" ")
+        q(" ")
         out_highlight(old_word,new_word,attributes_off,color_bytes_oldchanged,0)
         c = "  !  "
         ccolor = color_bytes_changed
@@ -141,14 +175,17 @@ function print_words(old_word, new_word,
         } else {
             new_cursor++
         }
-        out(c,ccolor)
+        q(c,ccolor)
         out_highlight(new_word,old_word,attributes_off,color_bytes_newchanged,0);
-        out("\n")
+        q(" ")
+        q_line()
     }
 }
 
 function print_end(){
-    out("\n ----------- END ----------- \n")
+    q_line()
+    q(" ----------- END ----------- ")
+    q_line()
 }
 
 # Takes a line of input in the original packed/overlapping input
@@ -233,14 +270,14 @@ function redact_lines(num_lines,
         context_count= -context
         # output redaction
 
-        out(" ")
-        out(".. .. .. .. <<< ",color_bytes_oldchanged)
+        q(" ")
+        q(".. .. .. .. <<< ",color_bytes_oldchanged)
         if(num_lines==1){
-            out("1 line")
+            q("1 line")
         }else{
-            out(sprintf("%d lines", num_lines))
+            q(sprintf("%d lines", num_lines))
         }
-        out("\n")
+        q_line()
         old_cursor+=num_lines
     }
 }
@@ -638,13 +675,12 @@ function add_map(dst, src, len,
 
 function setup_color() {
     # fetch terminal info if we can
-    INFOCMP = find_util("infocmp", "INFOCMP", 0)
     if(INFOCMP){
         RS="^$"
-        if (INFOCMP" -0" | getline) {
+        if ((cmd = INFOCMP" -0") | getline) {
             term = $0
+            close(cmd)
         }
-        close(INFOCMP" -0")
         RS="\n"
     }
     if (term ~ /colors/) {
@@ -653,6 +689,7 @@ function setup_color() {
         if (term ~ /smul=/ && term ~ /invis=/) {
             # Invis means we can hide the '---' separators, so make
             # things prettier with an underline.
+            attribute_underline = ";4"
             color_bar = "\033[0;8;4m"
             color_address_base = "\033[0;4m"
             # is bold or rev available?
@@ -665,6 +702,7 @@ function setup_color() {
             }
         }else{
             # can't hide the ---, so don't use underlines.
+            attribute_underline = ""
             color_bar = "\033[0m"
             color_address_base = "\033[0m"
             # is bold or rev available?
@@ -707,6 +745,7 @@ function disable_color(){
     color_bytes_newchanged=""
     color_bytes_changed=""
     color_bar=""
+    attribute_underline = ""
     attributes_off=""
 }
 
@@ -804,7 +843,7 @@ function usage(){
     err("")
     err("DETAILS:")
     err("")
-    err("     diff32 is an awk script that wraps the standard diff utility")
+    err("     diff32 is a gawk script that wraps the standard diff utility")
     err("     to produce a human-readable side-by-side text summary of")
     err("     differences between two raw 32-bit binary files. diff32 ")
     err("     searches for changes, insertions, and deletions.")
@@ -827,23 +866,35 @@ function usage(){
     err("")
     err("SEE ALSO:")
     err("")
-    err("  diff(1), cmp(1), xdelta(1), awk(1)")
+    err("  diff(1), cmp(1), xdelta(1), gawk(1)")
     err("")
 }
 
 function version () {
-    out("\n")
-    out("diff32 version 0.0.3\n")
-    if ("/usr/bin/awk --version" | getline) {
-        out($0"\n")
+    q_line()
+    q("diff32 version 0.0.3")
+    q_line()
+    if ((cmd = "/usr/bin/gawk --version 2>/dev/null") | getline) {
+        q($0)
+        close(cmd)
+        q_line()
     }
-    if (DIFF" --version" | getline) {
-        out($0"\n")
+    if ((cmd = DIFF" --version 2>/dev/null") | getline) {
+        q($0)
+        close(cmd)
+        q_line()
     }
-    if (LESS" --version" | getline) {
-        out($0"\n")
+    if ((cmd = LESS" --version 2>/dev/null") | getline) {
+        q($0)
+        close(cmd)
+        q_line()
     }
-    out("\n")
+    if ((cmd = INFOCMP" -V 2>/dev/null") | getline) {
+        q($0)
+        close(cmd)
+        q_line()
+    }
+    q_line()
 }
 
 function opterr(msg){
@@ -979,11 +1030,12 @@ function getopts(argc, argv,
 function output_maps(\
                      k){
     for(k=0; k < address_maps; k++) {
-        out(sprintf("MAP: 0x%08x -> 0x%08x\n",
+        q(sprintf("MAP: 0x%08x -> 0x%08x",
                     address_map_src[k],
                     address_map_dst[k]))
+        q_line()
     }
-    if(address_maps) out("\n")
+    if(address_maps) q_line()
 }
 
 function find_util(path, envvar, report,
@@ -1023,13 +1075,14 @@ BEGIN {
 
     DIFF = find_util("diff", "DIFFPROG", 1)
     LESS = find_util("less", "PAGER", 1)
+    INFOCMP = find_util("infocmp", "INFOCMP", 0)
     getopts(ARGC, ARGV)
 
     # Convert binary input to undecorated hexadecimal ASCII.
     # This outputs a line per word, however each line consists of the
     # current word and the previous match_words_max-1 words as well.
     # This way we match on multiple words but with granularity.
-    textify_cmd="LC_ALL=C /usr/bin/awk '                                \
+    textify_cmd="LC_ALL=C /usr/bin/gawk '                               \
         BEGIN {\n                                                       \
             BINMODE = 3\n                                               \
             RS = \"[\\0-\\xff]{4}\"\n                                   \
@@ -1053,7 +1106,7 @@ BEGIN {
         "<("textify_cmd" \""fileA"\") "                                 \
         "<("textify_cmd" \""fileB"\") "
     output_maps()
-    out("")
+    q("")
     while(!ERRNO && (diff_cmd | getline) > 0){
         line = $2
         if ($1=="="){
@@ -1122,7 +1175,7 @@ done
 if [ $use_pager == 1 ]; then
   ####################### pager case ############################
   # exec script, get output fd and pid.
-  exec {diff32_fd}< <(awk -f - -- "--color" "${args[@]}" <&$script_fd) ; script_pid=$!
+  exec {diff32_fd}< <(gawk -f - -- "--color" "${args[@]}" <&$script_fd) ; script_pid=$!
   # Trap interrupts before starting pager.
   trap _interrupt INT
   # Connect pager to script, get pager fd.
@@ -1137,5 +1190,5 @@ if [ $use_pager == 1 ]; then
 else
   ##################### non-pager case ##########################
   # run script.
-  awk -f - -- "${args[@]}" <&$script_fd
+  gawk -f - -- "${args[@]}" <&$script_fd
 fi
