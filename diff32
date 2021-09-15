@@ -106,44 +106,67 @@ function map_an_address(addr,
 }
 
 # Print an address header at the beginning of a new block of differences.
-function print_address(old, new,
-                       old_str, new_str, old_map, new_map){
+function print_address(                                                 \
+                       old, new, old_str, new_str, old_map, new_map){
 
-    # mapping is purely a cosmetic addition, so it's handled on-demand here
-    old_map = map_an_address(old)
-    new_map = map_an_address(new)
-    old_str = sprintf("0x%08x",old)
-    new_str = sprintf("0x%08x",new)
-
+    # do we need to print a footer for a previous block?
     if (hunks){
+        # pretty-print for terminals; add an underline to the last
+        # word entry.
         q_underline()
-        q_line()
-    }
-    hunks++
-
-    if (old == old_map && new == new_map){
+        # mapping is purely a cosmetic addition, so it's handled on-demand
+        old = block_old_cursor*4
+        new = block_new_cursor*4
+        old_map = map_an_address(old)
+        new_map = map_an_address(new)
+        old_str = sprintf("0x%08x",old)
+        new_str = sprintf("0x%08x",new)
+        # print address footer for prev block
         q(" ",color_bar)
         out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
         q(" ----- ",color_bar)
         out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
         q(" ", color_bar)
         q_line()
+        # blank line
+        q_line()
+    }
+    hunks++
+
+    old = old_cursor*4
+    new = new_cursor*4
+    old_map = map_an_address(old)
+    new_map = map_an_address(new)
+    old_str = sprintf("0x%08x",old)
+    new_str = sprintf("0x%08x",new)
+    if (old == old_map && new == new_map){
+        q(" ",color_bar_underline)
+        out_highlight(old_str,new_str,color_address_base_underline,
+                      color_address_diff_underline,1);
+        q(" ----- ",color_bar_underline)
+        out_highlight(new_str,old_str,color_address_base_underline,
+                      color_address_diff_underline,1);
+        q(" ", color_bar_underline)
+        q_line()
     } else {
         q(" ")
-        out_highlight(old_str,new_str,attributes_off,attributes_off,1);
+        out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
         q("       ")
-        out_highlight(new_str,old_str,attributes_off,attributes_off,1);
+        out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
         q_line()
 
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
 
         q("[")
-        out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
-        q(" -", color_bar)
-        q("MAP", color_address_base)
-        q("- ", color_bar)
-        out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
+        out_highlight(old_str,new_str,color_address_base_underline,
+                      color_address_diff_underline,1);
+        q(" -", color_bar_underline)
+        q("MAP", color_address_base_underline)
+        q("- ", color_bar_underline)
+        out_highlight(new_str,old_str,color_address_base_underline,
+                      color_address_diff_underline,1);
+        q("]")
         q_line()
     }
 }
@@ -180,6 +203,8 @@ function print_words(old_word, new_word,
         q(" ")
         q_line()
     }
+    block_old_cursor = old_cursor
+    block_new_cursor = new_cursor
 }
 
 function print_end(){
@@ -236,7 +261,7 @@ function submit_line(old_line, new_line,
             # Yes. post-context has run out, or we're at/near
             # beginning of file.  Skip a line for visual break and
             # print an address header.
-            print_address(old_cursor*4, new_cursor*4)
+            print_address()
             new_block=0
         }
         # Print any pending pre-context
@@ -259,7 +284,7 @@ function redact_lines(num_lines,
             # Yes. post-context has run out, or we're at/near
             # beginning of file.  Skip a line for visual break and
             # print an address header.
-            print_address(old_cursor*4, new_cursor*4)
+            print_address()
             new_block=0
         }
         # Print any pending pre-context
@@ -690,28 +715,38 @@ function setup_color() {
             # Invis means we can hide the '---' separators, so make
             # things prettier with an underline.
             attribute_underline = ";4"
-            color_bar = "\033[0;8;4m"
-            color_address_base = "\033[0;4m"
+            color_bar = "\033[0;8m"
+            color_bar_underline = "\033[0;8;4m"
+            color_address_base = "\033[0m"
+            color_address_base_underline = "\033[0;4m"
             # is bold or rev available?
             if (term ~ /bold=/) {
-                color_address_diff = "\033[0;1;4m"
+                color_address_diff = "\033[0;1m"
+                color_address_diff_underline = "\033[0;1;4m"
             } else if (term ~ /rev=/) {
-                color_address_diff = "\033[0;7;4m"
+                color_address_diff = "\033[0;7m"
+                color_address_diff_underline = "\033[0;7;4m"
             } else {
-                color_address_diff = "\033[0;4m"
+                color_address_diff = "\033[0m"
+                color_address_diff_underline = "\033[0;4m"
             }
         }else{
             # can't hide the ---, so don't use underlines.
             attribute_underline = ""
             color_bar = "\033[0m"
+            color_bar_underline = "\033[0m"
             color_address_base = "\033[0m"
+            color_address_base_underline = "\033[0m"
             # is bold or rev available?
             if (term ~ /bold=/) {
                 color_address_diff = "\033[0;1m"
+                color_address_diff_underline = "\033[0;1m"
             } else if (term ~ /rev=/) {
                 color_address_diff = "\033[0;7m"
+                color_address_diff_underline = "\033[0;7m"
             } else {
                 color_address_diff = "\033[0m"
+                color_address_diff_underline = "\033[0m"
             }
         }
         # is dim available?
@@ -745,6 +780,7 @@ function disable_color(){
     color_bytes_newchanged=""
     color_bytes_changed=""
     color_bar=""
+    color_bar_underline=""
     attribute_underline = ""
     attributes_off=""
 }
