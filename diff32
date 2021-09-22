@@ -122,7 +122,7 @@ function print_address(                                                 \
         old_str = sprintf("0x%08x",old)
         new_str = sprintf("0x%08x",new)
         # print address footer for prev block
-        q(" ",color_bar)
+        q(" ", color_bar)
         out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
         q(" ----- ",color_bar)
         out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
@@ -208,9 +208,29 @@ function print_words(old_word, new_word,
 }
 
 function print_end(){
+    q_underline()
     q_line()
     q(" ----------- END ----------- ")
     q_line()
+    q_flush()
+}
+
+function print_new_block(\
+                         i){
+    # Do we need to print an address header?
+    if (new_block) {
+        # Yes. post-context has run out, or we're at/near
+        # beginning of file.  Skip a line for visual break and
+        # print an address header.
+        print_address()
+        new_block=0
+    }
+    # Print any pending pre-context
+    for(i=context_count;i>0;i--) {
+        print_words(context_word[i-1],context_word[i-1])
+    }
+    # Mark need for trailing context before starting a new address block
+    context_count= -context
 }
 
 # Takes a line of input in the original packed/overlapping input
@@ -225,6 +245,20 @@ function format_word(line){
                        substr(line,6,2),
                        substr(line,8,2))
     }
+}
+
+function right_justify(str, chars,
+                      fill){
+    for(fill = chars - length(str);fill>0;fill--)
+        str = " "str
+    return str
+}
+
+function left_justify(str, chars,
+                       fill){
+    for(fill = chars - length(str);fill>0;fill--)
+        str = str" "
+    return str
 }
 
 # Toplevel for line-by-line output handling; manages context, address
@@ -256,21 +290,9 @@ function submit_line(old_line, new_line,
             }
         }
     } else {
-        # Do we need to print an address header?
-        if (new_block) {
-            # Yes. post-context has run out, or we're at/near
-            # beginning of file.  Skip a line for visual break and
-            # print an address header.
-            print_address()
-            new_block=0
-        }
-        # Print any pending pre-context
-        for(i=context_count;i>0;i--) {
-            print_words(context_word[i-1],context_word[i-1])
-        }
-        # Mark need for trailing context before starting a new address block
-        context_count= -context
-        # Flush/print as needed
+        # conditionally start a new block output
+        print_new_block()
+        # Flush/print requested words as needed
         print_words(old_word, new_word)
     }
 }
@@ -279,31 +301,53 @@ function submit_line(old_line, new_line,
 function redact_lines(num_lines,
                       i){
     if(num_lines > 0){
-        # Do we need to print an address header?
-        if (new_block) {
-            # Yes. post-context has run out, or we're at/near
-            # beginning of file.  Skip a line for visual break and
-            # print an address header.
-            print_address()
-            new_block=0
-        }
-        # Print any pending pre-context
-        for(i=context_count;i>0;i--) {
-            print_words(context_word[i-1],context_word[i-1])
-        }
-        # Mark need for trailing context before starting a new address block
-        context_count= -context
+        # conditionally start a new block output
+        print_new_block()
         # output redaction
-
         q(" ")
         q(".. .. .. .. <<< ",color_bytes_oldchanged)
         if(num_lines==1){
-            q("1 line")
+            q(left_justify("1 line",12))
         }else{
-            q(sprintf("%d lines", num_lines))
+            q(left_justify(sprintf("%d lines", num_lines),12))
         }
         q_line()
         old_cursor+=num_lines
+    }
+}
+
+# Variant of the above for elided output.
+function elide_lines(line, num, old_or_new,
+                       i){
+    if(num > 0){
+        word = format_word(line)
+        # conditionally start a new block output
+        print_new_block()
+        # output elided section
+        if(old_or_new == "old"){
+            q(" ")
+            out_highlight(word,"",attributes_off,color_bytes_oldchanged,0)
+            q(" <<< ",color_bytes_oldchanged)
+            if(num==1){
+                q(left_justify("1 line",12))
+            }else{
+                q(left_justify(sprintf("%d lines", num),12))
+            }
+            old_cursor+=num
+        } else {
+            if(num==1){
+                q(right_justify("1 line",12))
+            }else{
+                q(right_justify(sprintf("%d lines", num),12))
+            }
+            q(" >>> ",color_bytes_newchanged)
+            out_highlight(word,"",attributes_off,color_bytes_newchanged,0)
+            q(" ")
+            new_cursor+=num
+        }
+        q_line()
+        block_old_cursor = old_cursor
+        block_new_cursor = new_cursor
     }
 }
 
@@ -347,6 +391,72 @@ function remove_lines(num,
     remove_new(num)
 }
 
+# Given a subsection, determine if repeated lines need should be
+# elided for clarity.  Elide only if pure insertion, deletion, or both
+# sides of the diff are repeats.  Ditto marking is handled elsewhere.
+function elide_split(old_end, new_end,
+                        i, j, old_pos, new_pos){
+    old_pos=0
+    new_pos=0
+    while(old_pos < old_end || new_pos < new_end){
+        # match lines are never elided; they're likely to be
+        # part of context.
+        if(substr(old_line[old_pos],2,8) == substr(new_line[new_pos],2,8)){
+            submit_line(old_line[old_pos], new_line[new_pos])
+            old_pos++
+            new_pos++
+        } else {
+            for(i=old_pos+1; i<old_end; i++){
+                if(substr(old_line[old_pos],2,8) != substr(old_line[i],2,8)) break
+            }
+            for(j=new_pos+1; j<new_end; j++){
+                if(substr(new_line[new_pos],2,8) != substr(new_line[j],2,8)) break
+            }
+            i-=old_pos
+            j-=new_pos
+            if(i>5 && j>5){
+                # both sides have sufficient repeats to bother eliding.
+                elide_lines(old_line[old_pos],i,"old")
+                elide_lines(new_line[new_pos],j,"new")
+                old_pos+=i
+                new_pos+=j
+                continue
+            }
+            # Only elide as much as would shorten output
+            if(i>old_end-old_pos-new_end+new_pos){
+                i = old_end-old_pos-new_end+new_pos
+            }
+            if(j>new_end-new_pos-old_end+old_pos){
+                j = new_end-new_pos-old_end+old_pos
+            }
+            if(i>5){
+                # deletion
+                elide_lines(old_line[old_pos],i,"old")
+                old_pos+=i
+                continue
+            }
+            if(j>5){
+                # insertion
+                elide_lines(new_line[new_pos],j,"new")
+                new_pos+=j
+                continue
+            }
+            if(old_pos<old_end && new_pos<new_end){
+                submit_line(old_line[old_pos], new_line[new_pos])
+                old_pos++
+                new_pos++
+                continue
+            }
+            if(old_pos<old_end){
+                submit_line(old_line[old_pos],"")
+                old_pos++
+                continue
+            }
+            submit_line("",new_line[new_pos])
+            new_pos++
+        }
+    }
+}
 
 function output_split(old_end, new_end,
                      i, j, old_pos, new_pos){
@@ -367,18 +477,20 @@ function output_split(old_end, new_end,
     # context is not 0 then that's a user override, so don't redact it.
     if (redact) {
         redact_lines(old_pos)
-        for(j=0; j<new_pos; j++)
-            submit_line("",new_line[j])
+        elide_split(0,new_pos)
+        #for(j=0; j<new_pos; j++)
+        #    submit_line("",new_line[j])
     } else {
-        for(i=0; i<old_pos && i<new_pos; i++)
-            submit_line(old_line[i], new_line[i])
-        for(j=i; j<old_pos; j++)
-            submit_line(old_line[j],"")
-        for(j=i; j<new_pos; j++)
-            submit_line("",new_line[j])
+        elide_split(old_pos,new_pos)
+#        for(i=0; i<old_pos && i<new_pos; i++)
+#            submit_line(old_line[i], new_line[i])
+#        for(j=i; j<old_pos; j++)
+#            submit_line(old_line[j],"")
+#        for(j=i; j<new_pos; j++)
+#            submit_line("",new_line[j])
     }
 
-    # now push the exact bottom matches
+    # now push the exact bottom matches; don't redact or elide.
     while(old_pos<old_end && new_pos<new_end){
         submit_line(old_line[old_pos], new_line[new_pos])
         old_pos++
@@ -397,7 +509,7 @@ function match_forward(old_end, new_end,
     # submitting these exact matches (which will handle any
     # outputting needed).  Similarly, the recursive parsing breaks
     # up regions by exact match, and those exact matches will need
-    # to be pushed here as well.
+    # to be pushed out here as well.
     for(i=0; i<old_end && i<new_end; i++){
         if(substr(old_line[i],2,8) != substr(new_line[i],2,8))break
         submit_line(old_line[i],new_line[i])
