@@ -74,14 +74,11 @@ function out_highlight(to_print, to_compare, off_color, on_color, lock,
     if (to_print == "") {
         to_print = "           "
     }
-    if (to_compare == ""){
-        to_compare = "           "
-    }
     c=off_color
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
         b = substr(to_compare,i,1)
-        if(a != " "){
+        if(s != " "){
             if (a != b){
                 c = on_color
             } else {
@@ -173,9 +170,10 @@ function print_address(                                                 \
 
 # Print one line of a diff block.  Takes two words formatted for
 # display, optionally compares and applies highlights, adds the status
-# indicator ('<' and/or '>') and prints.
+# indicator ('<' and/or '>') and prints.  Optionally adds dittomarks
+# to clarify long runs of identical word values, but only in changed lines.
 function print_words(old_word, new_word,
-                    c, ccolor) {
+                     c, ccolor, ditto) {
     if(old_word == new_word){
         q(sprintf(" %s     %s ", old_word, new_word), color_bytes_unchanged)
         q_line()
@@ -183,7 +181,12 @@ function print_words(old_word, new_word,
         new_cursor++
     } else {
         q(" ")
-        out_highlight(old_word,new_word,attributes_off,color_bytes_oldchanged,0)
+        if(old_ditto && old_ditto == old_word){
+            ditto = "    \" \"    "
+        }else{
+            ditto = old_word
+        }
+        out_highlight(ditto,new_word,attributes_off,color_bytes_oldchanged,0)
         c = "  !  "
         ccolor = color_bytes_changed
         if (old_word == "") {
@@ -199,10 +202,17 @@ function print_words(old_word, new_word,
             new_cursor++
         }
         q(c,ccolor)
-        out_highlight(new_word,old_word,attributes_off,color_bytes_newchanged,0);
+        if(new_ditto && new_ditto == new_word){
+            ditto = "    \" \"    "
+        }else{
+            ditto = new_word
+        }
+        out_highlight(ditto,old_word,attributes_off,color_bytes_newchanged,0);
         q(" ")
         q_line()
     }
+    old_ditto = old_word
+    new_ditto = new_word
     block_old_cursor = old_cursor
     block_new_cursor = new_cursor
 }
@@ -224,6 +234,8 @@ function print_new_block(\
         # print an address header.
         print_address()
         new_block=0
+        old_ditto = ""
+        new_ditto = ""
     }
     # Print any pending pre-context
     for(i=context_count;i>0;i--) {
