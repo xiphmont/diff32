@@ -18,30 +18,13 @@ exec {script_fd}<<'#EOF'
 ############################### diff32 gawk script ##############################
 #!/usr/bin/gawk -E   # Unnecessary, seems clearer to include it.
 
-# hash for additional error checking, especially in redacted diffs.
-# input: numeric byte, crc state
-function crc32_byte(b, crc,
-               i, j) {
-    # initialize crc32 lookup table if not done already.
-    if(!ord[1]){
-        for(i=0;i<256;i++){
-            val = lshift(i,24)
-            for(j=0;j<8;j++){
-                if(and(val,0x80000000)){
-                    val = xor(and(lshift(val,1),0xffffffff),0x04C11DB7)
-                }else{
-                    val = and(lshift(val,1),0xffffffff)
-                }
-            }
-            ord[i] = val
-            printf("ORD %d == %08x\n",i,val)
-        }
-    }
-    crc = xor(and(lshift(crc, 8),0xffffff00), ord[and(xor(rshift(crc,24),b),0xff)])
-    return crc
+# POSIX crc32 hash for additional error checking, especially in redacted diffs.
+# input: single numeric byte, integer crc state
+function crc32_byte(v, crc) {
+    return xor(rshift(crc, 8), crc_table[and(xor(crc,v),0xff)])
 }
 
-# Takes a formatted word of four bytes as space-separated hex doubles.
+# Takes a string of four bytes formatted as space-separated hex doubles.
 function crc32_hexword(in_word, crc,
                i, j, hex) {
     split(in_word, hex, " ")
@@ -49,6 +32,55 @@ function crc32_hexword(in_word, crc,
         crc = crc32_byte(strtonum("0x"hex[i]),crc)
     }
     return crc
+}
+
+# Initialize the crc lookup table.  Standard POSIX CRC32 (eg, GNU
+# cksum) but bytereversed to save shifting.  Produces a byte-reversed
+# sum that must be swapped when finished.
+function init_crc(                              \
+                  i, j, a, b, c, d){
+    for(i=0;i<256;i++){
+        a = i
+        b = 0
+        c = 0
+        d = 0
+        for(j=0;j<8;j++){
+            a = lshift(a,1)
+            b = lshift(b,1)
+            c = lshift(c,1)
+            d = lshift(d,1)
+            if(!and(a,0x100))continue
+            a = xor(a,0x04)
+            b = xor(b,0xC1)
+            c = xor(c,0x1D)
+            d = xor(d,0xB7)
+        }
+        a = and(xor(a,rshift(b,8)),0xff)
+        b = and(xor(b,rshift(c,8)),0xff)
+        c = and(xor(c,rshift(d,8)),0xff)
+        d = and(                 d,0xff)
+        crc_table[i] = lshift(d,24)+lshift(c,16)+lshift(b,8)+a
+    }
+}
+
+# byteswap for printing CRC32 values that match cksum.
+function byteswap4(v,
+                   i, r){
+    for(i=0;i<4;i++){
+        r = lshift(r,8)
+        r = r + and(v,0xff)
+        v = rshift(v,8)
+    }
+    return r
+}
+
+# add a byte length to a naked checksum, complement, and bytereverse for printing.
+function gnuify_crc32(crc, bytelength){
+    while(bytelength){
+        crc = crc32_byte(and(bytelength,0xff),crc)
+        bytelength = rshift(bytelength,8)
+    }
+    return byteswap4(and(compl(crc),0xffffffff))
 }
 
 # Line-buffered program data output.  This queues pieces of a line (or
@@ -155,7 +187,7 @@ function print_address_footer(                                  \
         out_highlight(new_str" ",old_str" ",color_address_base,color_address_diff,1);
         q_line()
         # crc
-        q(sprintf(" 0x%08x  CRC  0x%08x ",block_old_crc,block_new_crc),color_address_deemph)
+        q(sprintf(" 0x%08x crc32 0x%08x ",block_old_crc,block_new_crc),color_address_deemph)
         q_line()
         # blank line
         q_line()
@@ -252,23 +284,16 @@ function print_end(\
     print_address_footer()
     discard_context()
     print_address()
-    q(" -----------",color_bar_underline)
+    q("[",color_address_base_underline)
+    q("-----------",color_bar_underline)
     q(" END ",color_address_base_underline)
-    q("----------- ",color_bar_underline)
+    q("-----------",color_bar_underline)
+    q("]",color_address_base_underline)
     q_line()
-    len = old_cursor*4
-    while(len){
-        old_crc = crc32_byte(and(len,0xff),old_crc)
-        len = rshift(len,8)
-    }
-    len = new_cursor*4
-    while(len){
-        new_crc = crc32_byte(and(len,0xff),new_crc)
-        len = rshift(len,8)
-    }
-    q(sprintf(" 0x%08x  CRC  0x%08x ",
-              and(compl(old_crc),0xffffffff),
-              and(compl(new_crc),0xffffffff)),color_address_deemph)
+    q(sprintf(" 0x%08x crc32 0x%08x ",
+              gnuify_crc32(old_crc, old_cursor*4),
+              gnuify_crc32(new_crc, new_cursor*4)),
+      color_address_deemph)
     q_line()
     q_flush()
 }
@@ -1312,12 +1337,7 @@ BEGIN {
     LESS = find_util("less", "PAGER", 1)
     INFOCMP = find_util("infocmp", "INFOCMP", 0)
     getopts(ARGC, ARGV)
-
-    crc=0
-    crc=crc32_byte(0x61,crc)
-    crc=crc32_byte(1,crc)
-    printf("CRC %d 0x%08x\n",and(compl(crc),0xffffffff),and(compl(crc),0xffffffff))
-
+    init_crc()
 
     # Convert binary input to undecorated hexadecimal ASCII.
     # This outputs a line per word, however each line consists of the
