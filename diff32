@@ -18,6 +18,39 @@ exec {script_fd}<<'#EOF'
 ############################### diff32 gawk script ##############################
 #!/usr/bin/gawk -E   # Unnecessary, seems clearer to include it.
 
+# hash for additional error checking, especially in redacted diffs.
+# input: numeric byte, crc state
+function crc32_byte(b, crc,
+               i, j) {
+    # initialize crc32 lookup table if not done already.
+    if(!ord[1]){
+        for(i=0;i<256;i++){
+            val = lshift(i,24)
+            for(j=0;j<8;j++){
+                if(and(val,0x80000000)){
+                    val = xor(and(lshift(val,1),0xffffffff),0x04C11DB7)
+                }else{
+                    val = and(lshift(val,1),0xffffffff)
+                }
+            }
+            ord[i] = val
+            printf("ORD %d == %08x\n",i,val)
+        }
+    }
+    crc = xor(and(lshift(crc, 8),0xffffff00), ord[and(xor(rshift(crc,24),b),0xff)])
+    return crc
+}
+
+# Takes a formatted word of four bytes as space-separated hex doubles.
+function crc32_hexword(in_word, crc,
+               i, j, hex) {
+    split(in_word, hex, " ")
+    for (i=1;i<=4;i++) {
+        crc = crc32_byte(strtonum("0x"hex[i]),crc)
+    }
+    return crc
+}
+
 # Line-buffered program data output.  This queues pieces of a line (or
 # lines really) to be explicitly flushed.  Optional argument sets the
 # passed ANSI escape attributes, but only if not already set to the
@@ -71,14 +104,14 @@ function err(string){
 # differences.
 function out_highlight(to_print, to_compare, off_color, on_color, lock,
                        current, a, b, c, i){
-    if (to_print == "") {
-        to_print = "           "
+    if (to_print == " ") {
+        to_print = "            "
     }
     c=off_color
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
         b = substr(to_compare,i,1)
-        if(s != " "){
+        if(a != " "){
             if (a != b){
                 c = on_color
             } else {
@@ -102,11 +135,11 @@ function map_an_address(addr,
     return addr
 }
 
-# Print an address header at the beginning of a new block of differences.
-function print_address(                                                 \
-                       old, new, old_str, new_str, old_map, new_map){
+# Print an address footer at the end of a preceding block of differences.
+function print_address_footer(                                  \
+                              old, new, old_str, new_str){
 
-    # do we need to print a footer for a previous block?
+    # Don't print a footer if there's no preceding block.
     if (hunks){
         # pretty-print for terminals; add an underline to the last
         # word entry.
@@ -114,22 +147,25 @@ function print_address(                                                 \
         # mapping is purely a cosmetic addition, so it's handled on-demand
         old = block_old_cursor*4
         new = block_new_cursor*4
-        old_map = map_an_address(old)
-        new_map = map_an_address(new)
         old_str = sprintf("0x%08x",old)
         new_str = sprintf("0x%08x",new)
         # print address footer for prev block
-        q(" ", color_bar)
-        out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
+        out_highlight(" "old_str," "new_str,color_address_base,color_address_diff,1);
         q(" ----- ",color_bar)
-        out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
-        q(" ", color_bar)
+        out_highlight(new_str" ",old_str" ",color_address_base,color_address_diff,1);
+        q_line()
+        # crc
+        q(sprintf(" 0x%08x  CRC  0x%08x ",block_old_crc,block_new_crc),color_address_deemph)
         q_line()
         # blank line
         q_line()
     }
     hunks++
+}
 
+# Print an address header at the beginning of a new block of differences.
+function print_address(                                                 \
+                       old, new, old_str, new_str, old_map, new_map){
     old = old_cursor*4
     new = new_cursor*4
     old_map = map_an_address(old)
@@ -137,33 +173,27 @@ function print_address(                                                 \
     old_str = sprintf("0x%08x",old)
     new_str = sprintf("0x%08x",new)
     if (old == old_map && new == new_map){
-        q(" ",color_bar_underline)
-        out_highlight(old_str,new_str,color_address_base_underline,
+        out_highlight(" "old_str," "new_str,color_address_base_underline,
                       color_address_diff_underline,1);
         q(" ----- ",color_bar_underline)
-        out_highlight(new_str,old_str,color_address_base_underline,
+        out_highlight(new_str" ",old_str" ",color_address_base_underline,
                       color_address_diff_underline,1);
-        q(" ", color_bar_underline)
         q_line()
     } else {
-        q(" ")
-        out_highlight(old_str,new_str,color_address_base,color_address_diff,1);
+        out_highlight(old_str" ",new_str" ",color_address_base,color_address_diff,1);
         q("       ")
-        out_highlight(new_str,old_str,color_address_base,color_address_diff,1);
-        q_line()
+        out_highlight(" "new_str," "old_str,color_address_base,color_address_diff,1);
 
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
 
-        q("[")
-        out_highlight(old_str,new_str,color_address_base_underline,
+        out_highlight("["old_str,"["new_str,color_address_base_underline,
                       color_address_diff_underline,1);
         q(" -", color_bar_underline)
         q("MAP", color_address_base_underline)
         q("- ", color_bar_underline)
-        out_highlight(new_str,old_str,color_address_base_underline,
+        out_highlight(new_str"]",old_str"]",color_address_base_underline,
                       color_address_diff_underline,1);
-        q("]")
         q_line()
     }
 }
@@ -173,20 +203,19 @@ function print_address(                                                 \
 # indicator ('<' and/or '>') and prints.  Optionally adds dittomarks
 # to clarify long runs of identical word values, but only in changed lines.
 function print_words(old_word, new_word,
-                     c, ccolor, ditto) {
+                     c, ccolor, ditto, dittodiff) {
     if(old_word == new_word){
         q(sprintf(" %s     %s ", old_word, new_word), color_bytes_unchanged)
         q_line()
         old_cursor++
         new_cursor++
     } else {
-        q(" ")
         if(old_ditto && old_ditto == old_word){
-            ditto = "    \" \"    "
+            out_highlight("     \" \"    "," "new_word,
+                          color_bytes_oldchanged,color_bytes_oldchanged,0)
         }else{
-            ditto = old_word
+            out_highlight(" "old_word," "new_word,attributes_off,color_bytes_oldchanged,0)
         }
-        out_highlight(ditto,new_word,attributes_off,color_bytes_oldchanged,0)
         c = "  !  "
         ccolor = color_bytes_changed
         if (old_word == "") {
@@ -203,24 +232,43 @@ function print_words(old_word, new_word,
         }
         q(c,ccolor)
         if(new_ditto && new_ditto == new_word){
-            ditto = "    \" \"    "
+            out_highlight("    \" \"     ",old_word" ",
+                          color_bytes_newchanged,color_bytes_newchanged,0);
         }else{
-            ditto = new_word
+            out_highlight(new_word" ",old_word" ",attributes_off,color_bytes_newchanged,0);
         }
-        out_highlight(ditto,old_word,attributes_off,color_bytes_newchanged,0);
-        q(" ")
         q_line()
     }
     old_ditto = old_word
     new_ditto = new_word
     block_old_cursor = old_cursor
     block_new_cursor = new_cursor
+    block_old_crc = old_crc
+    block_new_crc = new_crc
 }
 
-function print_end(){
-    q_underline()
+function print_end(\
+                   len){
+    print_address_footer()
+    discard_context()
+    print_address()
+    q(" -----------",color_bar_underline)
+    q(" END ",color_address_base_underline)
+    q("----------- ",color_bar_underline)
     q_line()
-    q(" ----------- END ----------- ")
+    len = old_cursor*4
+    while(len){
+        old_crc = crc32_byte(and(len,0xff),old_crc)
+        len = rshift(len,8)
+    }
+    len = new_cursor*4
+    while(len){
+        new_crc = crc32_byte(and(len,0xff),new_crc)
+        len = rshift(len,8)
+    }
+    q(sprintf(" 0x%08x  CRC  0x%08x ",
+              and(compl(old_crc),0xffffffff),
+              and(compl(new_crc),0xffffffff)),color_address_deemph)
     q_line()
     q_flush()
 }
@@ -229,6 +277,8 @@ function print_new_block(\
                          i){
     # Do we need to print an address header?
     if (new_block) {
+        # Print footer for preceding block.
+        print_address_footer()
         # Yes. post-context has run out, or we're at/near
         # beginning of file.  Skip a line for visual break and
         # print an address header.
@@ -243,6 +293,14 @@ function print_new_block(\
     }
     # Mark need for trailing context before starting a new address block
     context_count= -context
+}
+
+function discard_context(){
+    if(context_count>0){
+        old_cursor+=context_count
+        new_cursor+=context_count
+        context_count=0
+    }
 }
 
 # Takes a line of input in the original packed/overlapping input
@@ -274,11 +332,13 @@ function left_justify(str, chars,
 }
 
 # Toplevel for line-by-line output handling; manages context, address
-# output and line formatting
+# output, crcs, and line formatting.
 function submit_line(old_line, new_line,
                      i, old_word, new_word){
     old_word = format_word(old_line)
     new_word = format_word(new_line)
+    if(old_word) old_crc = crc32_hexword(old_word, old_crc)
+    if(new_word) new_crc = crc32_hexword(new_word, new_crc)
     if(old_word == new_word){
         # push the line into context or print it?
         if(context_count<0){
@@ -313,11 +373,13 @@ function submit_line(old_line, new_line,
 function redact_lines(num_lines,
                       i){
     if(num_lines > 0){
+        # update CRC with all lines to be redacted.
+        for(i = 0; i < num_lines; i++)
+            old_crc = crc32_hexword(format_word(old_line[i]), old_crc)
         # conditionally start a new block output
         print_new_block()
         # output redaction
-        q(" ")
-        q(".. .. .. .. <<< ",color_bytes_oldchanged)
+        q(" .. .. .. .. <<< ",color_bytes_oldchanged)
         if(num_lines==1){
             q(left_justify("1 line",12))
         }else{
@@ -325,6 +387,8 @@ function redact_lines(num_lines,
         }
         q_line()
         old_cursor+=num_lines
+        block_old_cursor = old_cursor
+        block_old_crc = old_crc
     }
 }
 
@@ -337,8 +401,10 @@ function elide_lines(line, num, old_or_new,
         print_new_block()
         # output elided section
         if(old_or_new == "old"){
-            q(" ")
-            out_highlight(word,"",attributes_off,color_bytes_oldchanged,0)
+            # update CRC with all lines to be elided.
+            for(i = 0; i < num; i++)
+                old_crc = crc32_hexword(word, old_crc)
+            out_highlight(" "word," ",attributes_off,color_bytes_oldchanged,0)
             q(" <<< ",color_bytes_oldchanged)
             if(num==1){
                 q(left_justify("1 line",12))
@@ -347,19 +413,23 @@ function elide_lines(line, num, old_or_new,
             }
             old_cursor+=num
         } else {
+            # update CRC with all lines to be elided.
+            for(i = 0; i < num; i++)
+                new_crc = crc32_hexword(word, new_crc)
             if(num==1){
                 q(right_justify("1 line",12))
             }else{
                 q(right_justify(sprintf("%d lines", num),12))
             }
             q(" >>> ",color_bytes_newchanged)
-            out_highlight(word,"",attributes_off,color_bytes_newchanged,0)
-            q(" ")
+            out_highlight(word" "," ",attributes_off,color_bytes_newchanged,0)
             new_cursor+=num
         }
         q_line()
         block_old_cursor = old_cursor
         block_new_cursor = new_cursor
+        block_old_crc = old_crc
+        block_new_crc = new_crc
     }
 }
 
@@ -413,7 +483,8 @@ function elide_split(old_end, new_end,
     while(old_pos < old_end || new_pos < new_end){
         # match lines are never elided; they're likely to be
         # part of context.
-        if(substr(old_line[old_pos],2,8) == substr(new_line[new_pos],2,8)){
+        if(old_pos < old_end && new_pos < new_end &&
+           substr(old_line[old_pos],2,8) == substr(new_line[new_pos],2,8)){
             submit_line(old_line[old_pos], new_line[new_pos])
             old_pos++
             new_pos++
@@ -897,7 +968,9 @@ function setup_color() {
 
 function disable_color(){
     color_address_base=""
+    color_address_base_underline=""
     color_address_diff=""
+    color_address_diff_underline=""
     color_address_deemph=""
     color_bytes_unchanged=""
     color_bytes_oldchanged=""
@@ -1225,6 +1298,8 @@ BEGIN {
     new_count=0
     old_advance=0
     new_advance=0
+    old_crc=0
+    new_crc=0
     advance_active=0
     diff_eof=0
     context_count=0
@@ -1237,6 +1312,12 @@ BEGIN {
     LESS = find_util("less", "PAGER", 1)
     INFOCMP = find_util("infocmp", "INFOCMP", 0)
     getopts(ARGC, ARGV)
+
+    crc=0
+    crc=crc32_byte(0x61,crc)
+    crc=crc32_byte(1,crc)
+    printf("CRC %d 0x%08x\n",and(compl(crc),0xffffffff),and(compl(crc),0xffffffff))
+
 
     # Convert binary input to undecorated hexadecimal ASCII.
     # This outputs a line per word, however each line consists of the
