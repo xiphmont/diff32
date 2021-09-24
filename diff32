@@ -1101,21 +1101,22 @@ function usage(){
     err("")
     err("  -n, --no-pager")
     err("")
+    err("     Do not use a pager or format/color output for display on a")
+    err("     terminal.  This overrides the default behavior of using a pager")
+    err("     and colorized output when stdout is attatched to a terminal.")
+    err("")
     err("  -p, --pager")
+    err("")
+    err("     Use a pager (default is \"less\") and colorize output (default")
+    err("     behavior when stdout is attatched to a terminal).")
     err("")
     err("  -r, --redact-original")
     err("")
     err("     Redact fileA's words from the diff32 output by emitting changes")
     err("     as block deletions from fileA marked '.. .. .. .. <<<', followed")
-    err("     by insertions from fileB. Context is set to zero, but may be over-")
-    err("     ridden by following with -c LINES.  Redaction is intended to")
+    err("     by insertions from fileB. Context is set to zero, but may be")
+    err("     over-ridden by following with -c LINES.  Redaction is intended to")
     err("     minimize the amount of information from fileA included in output.")
-    err("")
-    err("  -s, --swap-endian")
-    err("")
-    err("     diff32 normally presents bytes in as-read order. -s instructs")
-    err("     diff32 to swap the order it prints bytes on each line. -s has")
-    err("     no effect on matching as matching is endian-agnostic.")
     err("")
     err("  -v, --version")
     err("")
@@ -1140,14 +1141,13 @@ function usage(){
     err("")
     err("  --crc")
     err("")
-    err("     Perform CRC32 checksum of both files and each output hunk, placing")
-    err("     checksum values into hunk and file footers. --crc is default")
-    err("     behavior except when outputting to a pager/tty. --redact-original")
-    err("     implies --crc.")
+    err("     Add running CRC32 checksum of both files and each output hunk")
+    err("     to hunk and file footers. --crc is default behavior when stdout")
+    err("     is not attached to a terminal. -n and -r imply also --crc.")
     err("")
     err("  --no-crc")
     err("")
-    err("     Disable CRC32 checksumming.")
+    err("     Disable CRC32 checksumming. -p implies --no-crc.")
     err("")
     err("DETAILS:")
     err("")
@@ -1172,13 +1172,13 @@ function usage(){
     err("     to file secret2 without including byte values from secret1. Hunk")
     err("     match verification is performed by location and checksum.")
     err("")
-    err("  diff32 -m 0x6000 -m 0,0x2000,0x2000 -m 0x4000,0,0x2000 ovlay1 ovlay2")
+    err("  diff32 -m 0x600 -m 0,0x200,0x200 -m 0x400,0,0x200 overlay1 overlay2")
     err("")
-    err("     View a paged/colorized diff between ovlay1 and ovlay2, adding map")
-    err("     header entries reflecting where different portions of the file")
-    err("     are mapped into working memory in order to make the diff32 output")
-    err("     easier to compare to live memory when using tools such as Ghidra")
-    err("     or IDA.")
+    err("     View a paged/colorized difference summary between overlay1 and")
+    err("     overlay2 adding map header entries reflecting where different")
+    err("     portions of the file are mapped.  Maps can make diff32 output")
+    err("     easier to compare to live memory locations when using tools such")
+    err("     as Ghidra or IDA with overlays and compacted binaries.")
     err("")
     err("AUTHOR:")
     err("")
@@ -1193,29 +1193,29 @@ function usage(){
 }
 
 function version () {
-    q_line()
-    q("diff32 version 0.9.0")
+    q("  diff32 version 0.9.0, plus:")
     q_line()
     if ((cmd = "/usr/bin/gawk --version 2>/dev/null") | getline) {
-        q($0)
+        q("    "$0)
         close(cmd)
         q_line()
     }
     if ((cmd = DIFF" --version 2>/dev/null") | getline) {
-        q($0)
+        q("    "$0)
         close(cmd)
         q_line()
     }
     if ((cmd = LESS" --version 2>/dev/null") | getline) {
-        q($0)
+        q("    "$0)
         close(cmd)
         q_line()
     }
     if ((cmd = INFOCMP" -V 2>/dev/null") | getline) {
-        q($0)
+        q("    "$0)
         close(cmd)
         q_line()
     }
+    q_line()
     q_line()
 }
 
@@ -1329,8 +1329,6 @@ function getopts(argc, argv,
                     # the actual paging setup is handled by the shell wrapper
                     setup_color()
                     if (!redact_active) crc_active = 0
-                } else if (option == "s" || option == "swap-endian") {
-                    swap = 1
                 } else if (option == "v" || option == "version") {
                     version()
                     exit(0)
@@ -1447,10 +1445,23 @@ BEGIN {
             }\n                                                         \
         }\n                                                             \
         {\n                                                             \
-            word = \"\"tohex[substr(RT,1,1)]\n                          \
-            for(i=2;i<=8;i++) word = word\"\"tohex[substr(RT,i,1)]\n    \
-            line = \"w\"word\"\"substr(line,1,"match_words_max"*9-9)\n  \
-            print line\n                                                \
+            if(RT){\n                                                   \
+                # normal case: grabbed four bytes\n                     \
+                word = \"\"tohex[substr(RT,1,1)]\n                      \
+                for(i=2;i<=4;i++) word = word\"\"tohex[substr(RT,i,1)]\n \
+                line = \"w\"word\"\"substr(line,1,"match_words_max"*9-9)\n \
+                print line\n                                            \
+            }else{\n                                                    \
+                # error case: should only happen if EOF happens\n       \
+                # before a full 4 bytes\n                               \
+                l = length($0)\n                                        \
+                if(l<1 || l>3) exit(1)\n                                \
+                word = \"\"tohex[substr($0,1,1)]\n                      \
+                for(i=2;i<=l;i++) word = word\"\"tohex[substr($0,i,1)]\n \
+                line = \"w\"word\"\"substr(line,1,"match_words_max"*9-9)\n \
+                print line\n                                            \
+                exit(0)\n                                               \
+           }                                                            \
         }'"
     diff_cmd=DIFF" "                                                    \
         "--old-line-format=$'< %l\n' "                                  \
