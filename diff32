@@ -896,7 +896,7 @@ function add_map(dst, src, len,
         # we're cutting/replacing.
         src_prev = 0
         dst_prev = 0
-        for(j=i; j < address_maps; j++) {
+        for(j=0; j < address_maps; j++) {
             if(address_map_src[j] > src+len) break
             src_prev = address_map_src[j];
             dst_prev = address_map_dst[j];
