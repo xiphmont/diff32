@@ -522,7 +522,7 @@ function elide_split(old_end, new_end,
             }
             i-=old_pos
             j-=new_pos
-            if(i>5 && j>5){
+            if(i>elision_thresh && j>elision_thresh){
                 # both sides have sufficient repeats to bother eliding.
                 elide_lines(old_line[old_pos],i,"old")
                 elide_lines(new_line[new_pos],j,"new")
@@ -537,13 +537,13 @@ function elide_split(old_end, new_end,
             if(j>new_end-new_pos-old_end+old_pos){
                 j = new_end-new_pos-old_end+old_pos
             }
-            if(i>5){
+            if(i>elision_thresh){
                 # deletion
                 elide_lines(old_line[old_pos],i,"old")
                 old_pos+=i
                 continue
             }
-            if(j>5){
+            if(j>elision_thresh){
                 # insertion
                 elide_lines(new_line[new_pos],j,"new")
                 new_pos+=j
@@ -585,17 +585,23 @@ function output_split(old_end, new_end,
     # context is not 0 then that's a user override, so don't redact it.
     if (redact) {
         redact_lines(old_pos)
-        elide_split(0,new_pos)
-        #for(j=0; j<new_pos; j++)
-        #    submit_line("",new_line[j])
+        if(elision_active){
+            elide_split(0,new_pos)
+        }else{
+            for(j=0; j<new_pos; j++)
+                submit_line("",new_line[j])
+        }
     } else {
-        elide_split(old_pos,new_pos)
-#        for(i=0; i<old_pos && i<new_pos; i++)
-#            submit_line(old_line[i], new_line[i])
-#        for(j=i; j<old_pos; j++)
-#            submit_line(old_line[j],"")
-#        for(j=i; j<new_pos; j++)
-#            submit_line("",new_line[j])
+        if(elision_active){
+            elide_split(old_pos,new_pos)
+        }else{
+            for(i=0; i<old_pos && i<new_pos; i++)
+                submit_line(old_line[i], new_line[i])
+            for(j=i; j<old_pos; j++)
+                submit_line(old_line[j],"")
+            for(j=i; j<new_pos; j++)
+                submit_line("",new_line[j])
+        }
     }
 
     # now push the exact bottom matches; don't redact or elide.
@@ -1041,9 +1047,28 @@ function usage(){
     err("     Include NUM lines of copied context before and after changes.")
     err("     Minimum value is 0, maximum is 16.  Default is 3.")
     err("")
-    err("  -d, --minimal")
+    err("  -d, --dittomarks")
     err("")
-    err("     Try hard to find a smaller set of changes.")
+    err("     Mark consecutive identical words in fileA or fileB with ditto")
+    err("     marks (\" \"), rather than printing the literal values, in")
+    err("     order to highlight runs of identical values.  Only lines where")
+    err("     the fileA and fileB sides differ will be marked; context and")
+    err("     other identical matching lines will not be marked.")
+    err("")
+    err("  -D, --no-dittomarks")
+    err("")
+    err("     Disable dittomarking.")
+    err("")
+    err("  -e, --elide=NUM")
+    err("")
+    err("     Perform output elision when it will shorten the output by NUM")
+    err("     lines or more. Elision replaces runs of identical entries on the")
+    err("     left or right side with a single line indicating the repeated")
+    err("     word and number of times the word is repeated. Default NUM is 4.")
+    err("")
+    err("  -E, --no-elision")
+    err("")
+    err("     Disable elision.")
     err("")
     err("  -h, --help")
     err("")
@@ -1053,7 +1078,7 @@ function usage(){
     err("")
     err("     Sets the minimum length in words of a match when performing")
     err("     subdivision of large regions.  NUM may be 1 through 32 (default")
-    err("     is 2 lines/words) and must be less than or equal to the initial")
+    err("     is 1 words) and must be less than or equal to the initial")
     err("     match length.")
     err("")
     err("  -L, --initial-match-length=NUM")
@@ -1106,28 +1131,49 @@ function usage(){
     err("")
     err("  --color")
     err("")
-    err("     Colorize the output.  Default behavior when using a pager.")
+    err("     Colorize the output.  Default behavior when using the default")
+    err("     pager or outputting directly to a tty.")
     err("")
     err("  --no-color")
     err("")
     err("     Do not colorize the output.")
     err("")
+    err("  --crc")
+    err("")
+    err("     Perform CRC32 checksum of both files and each output hunk, placing")
+    err("     checksum values into hunk and file footers. --crc is default")
+    err("     behavior except when outputting to a pager/tty. --redact-original")
+    err("     implies --crc.")
+    err("")
+    err("  --no-crc")
+    err("")
+    err("     Disable CRC32 checksumming.")
+    err("")
     err("DETAILS:")
     err("")
     err("     diff32 is a gawk script that wraps the standard diff utility")
-    err("     to produce a human-readable side-by-side text summary of")
-    err("     differences between two raw 32-bit binary files. diff32 ")
-    err("     searches for changes, insertions, and deletions.")
+    err("     to produce a human- or machine-readable side-by-side text summary")
+    err("     of differences between two raw 32-bit binary files. diff32 ")
+    err("     searches for changes, insertions, and deletions. It can be used")
+    err("     to manually inspect differences between two binary files, or as")
+    err("     a automated format of binary patch interchange.")
     err("")
-    err("EXAMPLE:")
+    err("EXAMPLES:")
     err("")
     err("  diff32 mips_binary1.bin mips_binary2.bin")
     err("")
     err("     Produce a colorized summary of the differences in binary files")
     err("     mips_binary1.bin and mips_binary2.bin, presented on the terminal")
-    err("     one page at a time using the 'less' utility. The -d option to")
-    err("     diff32 requests extra time be spent to minimize the change")
-    err("     set. The -R option instructs less to allow ANSI color codes.")
+    err("     one page at a time using the 'less' utility.")
+    err("")
+    err("  diff32 -r secret1 secret2")
+    err("")
+    err("     Produce a patch that specifies how to convert binary file secret1")
+    err("     to file secret2 without including byte values from secret1. Hunk")
+    err("     match verification is performed by location and checksum.")
+    err("")
+    err("  diff32 -m 0x6000 -m 0,0x2000,0x2000 -m 0x4000,0,0x2000 ovlay1 ovlay2")
+    err("")
     err("")
     err("AUTHOR:")
     err("")
@@ -1137,13 +1183,13 @@ function usage(){
     err("")
     err("SEE ALSO:")
     err("")
-    err("  diff(1), cmp(1), xdelta(1), gawk(1)")
+    err("  patch32(1), diff(1), cmp(1), xdelta(1), gawk(1), less(1), infocmp(1)")
     err("")
 }
 
 function version () {
     q_line()
-    q("diff32 version 0.0.3")
+    q("diff32 version 0.9.0")
     q_line()
     if ((cmd = "/usr/bin/gawk --version 2>/dev/null") | getline) {
         q($0)
@@ -1224,8 +1270,6 @@ function getopts(argc, argv,
                     if(context < 0 || context > 16){
                         opterr("Context argument must be in the range 0..16.")
                     }
-                } else if (option == "d" || option == "minimal") {
-                    minimal = "-d "
                 } else if (option == "r" || option == "redact-original") {
                     redact = 1
                     context = 0
@@ -1322,7 +1366,6 @@ function find_util(path, envvar, report,
 BEGIN {
     # arguments
     context = 3
-    minimal = ""
     swap = 0
     redact = 0
     match_words_min = 1
@@ -1340,6 +1383,8 @@ BEGIN {
     new_crc=0
     crc_active=1
     advance_active=0
+    elision_active=1
+    elision_thresh=5
     diff_eof=0
     context_count=0
     new_block=1
