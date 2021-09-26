@@ -1,3 +1,4 @@
+# -*-Awk-*-
 #!/bin/sh
 
 ########################### diff32 bash paging wrapper ##########################
@@ -18,25 +19,23 @@ exec {script_fd}<<'#EOF'
 ############################### diff32 gawk script ##############################
 #!/usr/bin/gawk -E   # Unnecessary, seems clearer to include it.
 
-# POSIX crc32 hash for additional error checking, especially in redacted diffs.
+#---------------------------------------------------------------------
+#            POSIX CRC32 implementation.  Self-contained, no side
+#            effects outside this layer.  init() creates a global
+#            crc_table[] lookup.
+#
+#            The values calculated and printed are compatible with GNU
+#            cksum, which includes byte count in the calculation.
+#            Calculation is byte-reversed (not bitreversed) from the
+#            usual inplementations, so the printed results must bre
+#            byteswapped before printing.
+
 # input: single numeric byte, integer crc state
 function crc32_byte(v, crc) {
     return xor(rshift(crc, 8), crc_table[and(xor(crc,v),0xff)])
 }
 
-# Takes a string of four bytes formatted as space-separated hex doubles.
-function crc32_hexword(in_word, crc,
-               i, j, hex) {
-    split(in_word, hex, " ")
-    for (i=1;i<=4;i++) {
-        crc = crc32_byte(strtonum("0x"hex[i]),crc)
-    }
-    return crc
-}
-
-# Initialize the crc lookup table.  Standard POSIX CRC32 (eg, GNU
-# cksum) but bytereversed to save shifting.  Produces a byte-reversed
-# sum that must be swapped when finished.
+# Initialize the crc lookup table.
 function init_crc(                              \
                   i, j, a, b, c, d){
     for(i=0;i<256;i++){
@@ -74,7 +73,8 @@ function byteswap4(v,
     return r
 }
 
-# add a byte length to a naked checksum, complement, and bytereverse for printing.
+# add a byte length to a naked checksum, complement, and bytereverse
+# for printing cksum compatible results.
 function gnuify_crc32(crc, bytelength){
     while(bytelength){
         crc = crc32_byte(and(bytelength,0xff),crc)
@@ -83,10 +83,32 @@ function gnuify_crc32(crc, bytelength){
     return byteswap4(and(compl(crc),0xffffffff))
 }
 
-# Line-buffered program data output.  This queues pieces of a line (or
-# lines really) to be explicitly flushed.  Optional argument sets the
-# passed ANSI escape attributes, but only if not already set to the
-# same string.
+#---------------------------------------------------------------------
+#            Line-buffered data output layer.  No side effects outside
+#            this layer, though it access variables from the terminal
+#            setup layer.
+#
+#            Global state: output_q_buffer
+#                          output_q_lineready
+#                          current_q_attribute
+#
+#            Read-only:    attribute_underline
+#                          attributes_off
+#                          err_device
+#
+#            The line buffer layer queues pieces of a line (or lines
+#            really) to be explicitly flushed.  The goal here is not
+#            performance, but to allow us to go back and alter the
+#            pretty-printing on block boundaries (specifically a block
+#            end/footer), without having to work ahead by arbitrary
+#            amount.  It also tracks the last set ANSI attribute
+#            string set by pretty-printing and does not re-emit if the
+#            same setting is requested again.
+
+# Accepts a string fragment to add to the queue. Optional argument
+# sets the passed ANSI escape attributes if not already set to the
+# same string.  Omitting the optional argument emits the sequence to
+# disable attributes.
 function q(string, attribute){
     if (output_q_lineready) q_flush()
     if (!attribute) attribute = attributes_off
@@ -125,7 +147,38 @@ function q_flush(){
 
 # Program error output
 function err(string){
-    print string > err_dev
+    print string > err_device
+}
+
+
+
+
+
+
+# Takes a string of bytes formatted as space-separated hex doubles.
+# updates the cursors and performs crc if active.
+function bytecount_old_word(old_word,
+                            i, n, hex) {
+    n = split(old_word, hex, " ")
+    old_cursor += n
+    if(crc_active){
+        for (i=1;i<=n;i++) {
+            old_crc = crc32_byte(strtonum("0x"hex[i]),old_crc)
+        }
+    }
+}
+
+# Takes a string of bytes formatted as space-separated hex doubles.
+# updates the cursors and performs crc if active.
+function bytecount_new_word(new_word,
+                            i, n, hex) {
+    n = split(new_word, hex, " ")
+    new_cursor += n
+    if(crc_active){
+        for (i=1;i<=n;i++) {
+            new_crc = crc32_byte(strtonum("0x"hex[i]),new_crc)
+        }
+    }
 }
 
 # helper function to print the input, optionally colorizing the
@@ -176,17 +229,18 @@ function print_address_footer(                                  \
         # print crc for footer if active
         if(crc_active){
             # crc
-            q(sprintf(" 0x%08x  crc  0x%08x ",block_old_crc,block_new_crc),color_address_deemph)
+            q(sprintf(" 0x%08x  crc  0x%08x ",
+                      gnuify_crc32(block_old_crc,block_old_cursor),
+                      gnuify_crc32(block_new_crc,block_new_cursor)),
+              color_address_deemph)
             q_line()
         }
         # Pretty-print for terminals; add an underline to the last
         # word entry.
         q_underline()
         # Print current addresses for footer.
-        old = block_old_cursor*4
-        new = block_new_cursor*4
-        old_str = sprintf("0x%08x",old)
-        new_str = sprintf("0x%08x",new)
+        old_str = sprintf("0x%08x",block_old_cursor)
+        new_str = sprintf("0x%08x",block_new_cursor)
         out_highlight(" "old_str," "new_str,color_address_base,color_address_diff,1);
         q(" ----- ",color_bar)
         out_highlight(new_str" ",old_str" ",color_address_base,color_address_diff,1);
@@ -200,10 +254,8 @@ function print_address_footer(                                  \
 # Print an address header at the beginning of a new block of differences.
 function print_address(                                                 \
                        old, new, old_str, new_str, old_map, new_map){
-    old = old_cursor*4
-    new = new_cursor*4
-    old_str = sprintf("0x%08x",old)
-    new_str = sprintf("0x%08x",new)
+    old_str = sprintf("0x%08x",old_cursor)
+    new_str = sprintf("0x%08x",new_cursor)
     out_highlight(" "old_str," "new_str,color_address_base_underline,
                   color_address_diff_underline,1);
     q(" ----- ",color_bar_underline)
@@ -211,9 +263,9 @@ function print_address(                                                 \
                   color_address_diff_underline,1);
     q_line()
     # If there's an address mapping in effect for this region, indicate it.
-    old_map = map_an_address(old)
-    new_map = map_an_address(new)
-    if (old != old_map || new != new_map){
+    old_map = map_an_address(old_cursor)
+    new_map = map_an_address(new_cursor)
+    if (old_cursor != old_map || new_cursor != new_map){
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
 
@@ -227,36 +279,31 @@ function print_address(                                                 \
 }
 
 # Print one line of a diff block.  Takes two words formatted for
-# display, optionally compares and applies highlights, adds the status
+# display, compares and applies highlights, adds the status
 # indicator ('<' and/or '>') and prints.  Optionally adds dittomarks
 # to clarify long runs of identical word values, but only in changed lines.
-function print_words(old_word, new_word,
+function print_diff_line(old_word, new_word,
                      c, ccolor) {
     if(old_word == new_word){
         q(sprintf(" %s     %s ", old_word, new_word), color_bytes_unchanged)
         q_line()
-        old_cursor++
-        new_cursor++
     } else {
         if(ditto_active && old_ditto && old_ditto == old_word){
             out_highlight("     \" \"    "," "new_word,
                           color_bytes_oldchanged,color_bytes_oldchanged,0)
         }else{
-            out_highlight(" "old_word," "new_word,attributes_off,color_bytes_oldchanged,0)
+            out_highlight(" "old_word," "new_word,
+                          attributes_off,color_bytes_oldchanged,0)
         }
         c = "  !  "
         ccolor = color_bytes_changed
         if (old_word == "") {
             ccolor = color_bytes_newchanged
             c = "  >  "
-        } else {
-            old_cursor++
         }
         if (new_word == ""){
             ccolor = color_bytes_oldchanged
             c = "  <  "
-        } else {
-            new_cursor++
         }
         q(c,ccolor)
         if(ditto_active && new_ditto && new_ditto == new_word){
@@ -267,6 +314,8 @@ function print_words(old_word, new_word,
         }
         q_line()
     }
+    bytecount_old_word(old_word)
+    bytecount_new_word(new_word)
     old_ditto = old_word
     new_ditto = new_word
     block_old_cursor = old_cursor
@@ -275,15 +324,41 @@ function print_words(old_word, new_word,
     block_new_crc = new_crc
 }
 
-function print_end(\
-                   len){
+function print_precontext(){
+    while(context_count>0){
+        context_count--
+        print_diff_line(context_word[context_count],context_word[context_count])
+    }
+}
+
+
+
+# Discard but count metrics for one line of a diff block; called for
+# lines between blocks.  Takes two words formatted for display.
+function discard_context_line(){
+    if(context_count>0){
+        context_count--
+        bytecount_old_word(context_word[context_count])
+        bytecount_new_word(context_word[context_count])
+        old_ditto = ""
+        new_ditto = ""
+        new_block=1
+    }
+}
+
+function discard_all_context(){
+    # discard but count any pending pre-context
+    while(context_count>0) discard_context_line()
+}
+
+function print_end(){
     print_address_footer()
-    discard_context()
+    discard_all_context()
     print_address()
     if(crc_active){
         q(sprintf(" 0x%08x  crc  0x%08x ",
-                  gnuify_crc32(old_crc, old_cursor*4),
-                  gnuify_crc32(new_crc, new_cursor*4)),
+                  gnuify_crc32(old_crc, old_cursor),
+                  gnuify_crc32(new_crc, new_cursor)),
           color_address_deemph)
         q_underline()
         q_line()
@@ -304,28 +379,13 @@ function print_new_block(\
     if (new_block) {
         # Print footer for preceding block.
         print_address_footer()
-        # Yes. post-context has run out, or we're at/near
-        # beginning of file.  Skip a line for visual break and
-        # print an address header.
         print_address()
         new_block=0
-        old_ditto = ""
-        new_ditto = ""
     }
     # Print any pending pre-context
-    for(i=context_count;i>0;i--) {
-        print_words(context_word[i-1],context_word[i-1])
-    }
+    print_precontext()
     # Mark need for trailing context before starting a new address block
     context_count= -context
-}
-
-function discard_context(){
-    if(context_count>0){
-        old_cursor+=context_count
-        new_cursor+=context_count
-        context_count=0
-    }
 }
 
 # Takes a line of input in the original packed/overlapping input
@@ -362,13 +422,11 @@ function submit_line(old_line, new_line,
                      i, old_word, new_word){
     old_word = format_word(old_line)
     new_word = format_word(new_line)
-    if(old_word) old_crc = crc32_hexword(old_word, old_crc)
-    if(new_word) new_crc = crc32_hexword(new_word, new_crc)
     if(old_word == new_word){
         # push the line into context or print it?
         if(context_count<0){
             # running out post-context, so print
-            print_words(old_word,old_word)
+            print_diff_line(old_word,new_word)
             context_count++
         } else {
             # already passed [context] identical lines, push to context queue
@@ -376,31 +434,25 @@ function submit_line(old_line, new_line,
                 context_word[i]=context_word[i-1]
             }
             context_word[0] = old_word
-            if( context_count < context) {
-                context_count++
-            }else{
-                # a line got pushed out of the context, update the
-                # print address cursors
-                old_cursor++
-                new_cursor++
-                new_block=1
+            context_count++
+            if(context_count > context) {
+                # Over limit; push a line out of the context
+                discard_context_line()
             }
         }
     } else {
         # conditionally start a new block output
         print_new_block()
         # Flush/print requested words as needed
-        print_words(old_word, new_word)
+        print_diff_line(old_word, new_word)
     }
 }
 
-# Variant of the above for redacted output.
+# Specialized version of submit_line + print_diff_line for redacted
+# output.
 function redact_lines(num_lines,
                       i){
     if(num_lines > 0){
-        # update CRC with all lines to be redacted.
-        for(i = 0; i < num_lines; i++)
-            old_crc = crc32_hexword(format_word(old_line[i]), old_crc)
         # conditionally start a new block output
         print_new_block()
         # output redaction
@@ -411,44 +463,47 @@ function redact_lines(num_lines,
             q(left_justify(sprintf("%d lines", num_lines),12))
         }
         q_line()
-        old_cursor+=num_lines
+        # update CRC and printed byte count, must be done after
+        # print_new_block()
+        for(i = 0; i < num_lines; i++)
+            bytecount_old_word(format_word(old_line[i]))
         block_old_cursor = old_cursor
         block_old_crc = old_crc
     }
 }
 
-# Variant of the above for elided output.
-function elide_lines(line, num, old_or_new,
+# Specialized version of submit_line + print_diff_line for elided
+# output.
+function elide_lines(line, num_lines, old_or_new,
                        i){
-    if(num > 0){
+    if(num_lines > 0){
         word = format_word(line)
         # conditionally start a new block output
         print_new_block()
         # output elided section
         if(old_or_new == "old"){
-            # update CRC with all lines to be elided.
-            for(i = 0; i < num; i++)
-                old_crc = crc32_hexword(word, old_crc)
             out_highlight(" "word," ",attributes_off,color_bytes_oldchanged,0)
             q(" <<< ",color_bytes_oldchanged)
-            if(num==1){
+            if(num_lines==1){
                 q(left_justify("1 line",12))
             }else{
-                q(left_justify(sprintf("%d lines", num),12))
+                q(left_justify(sprintf("%d lines", num_lines),12))
             }
-            old_cursor+=num
+            # update CRC and counts, must be done after print_new_block()
+            for(i = 0; i < num_lines; i++)
+                bytecount_old_word(word)
         } else {
-            # update CRC with all lines to be elided.
-            for(i = 0; i < num; i++)
-                new_crc = crc32_hexword(word, new_crc)
-            if(num==1){
+            if(num_lines==1){
                 q(right_justify("1 line",12))
             }else{
-                q(right_justify(sprintf("%d lines", num),12))
+                q(right_justify(sprintf("%d lines", num_lines),12))
             }
             q(" >>> ",color_bytes_newchanged)
             out_highlight(word" "," ",attributes_off,color_bytes_newchanged,0)
-            new_cursor+=num
+            # update CRC and printed byte count, must be done after
+            # print_new_block()
+            for(i = 0; i < num_lines; i++)
+                bytecount_new_word(word)
         }
         q_line()
         block_old_cursor = old_cursor
@@ -464,18 +519,18 @@ function abs(v){
     return v
 }
 
-function push_old(line){
+function push_old_line(line){
     old_line[old_count++]=line
     old_advance--
 }
 
-function push_new(line){
+function push_new_line(line){
     new_line[new_count++]=line
     new_advance--
 }
 
-function remove_old(num,
-                      j){
+function remove_old_lines(num,
+                          j){
     # More concerned about being correct than
     # efficient right now, so doing it the simple way and just
     # shifting the line buffers.
@@ -483,19 +538,13 @@ function remove_old(num,
     for(j=0; j<old_count; j++) old_line[j]=old_line[j+num]
 }
 
-function remove_new(num,
+function remove_new_lines(num,
                       j){
     # More concerned about being correct than
     # efficient right now, so doing it the simple way and just
     # shifting the line buffers.
     new_count -= num
     for(j=0; j<new_count; j++) new_line[j]=new_line[j+num]
-}
-
-function remove_lines(num,
-                      j){
-    remove_old(num)
-    remove_new(num)
 }
 
 # Given a subsection, determine if repeated lines need should be
@@ -611,8 +660,8 @@ function output_split(old_end, new_end,
         new_pos++
     }
     # done
-    remove_old(old_end)
-    remove_new(new_end)
+    remove_old_lines(old_end)
+    remove_new_lines(new_end)
 }
 
 function match_forward(old_end, new_end,
@@ -631,7 +680,8 @@ function match_forward(old_end, new_end,
 
     # Submitted lines need to be removed from the old and
     # new line lists.
-    if (i>0) remove_lines(i)
+    remove_old_lines(i)
+    remove_new_lines(i)
     return i
 }
 
@@ -691,7 +741,6 @@ function set_exclusions(old_end,
     for(i=0; i<old_end; i++)
         old_line[i]=gensub(/(w)(00000000|ffffffff)/,"x\\2","g",old_line[i])
 }
-
 
 function clear_exclusions(old_end,
                           i){
@@ -1028,10 +1077,10 @@ function disable_color(){
 
 function stdout_usage(\
                       save_dev){
-    save_dev=err_dev
-    err_dev="/dev/stdout"
+    save_dev=err_device
+    err_device="/dev/stdout"
     usage()
-    err_dev=save_dev
+    err_device=save_dev
 }
 
 function usage(){
@@ -1422,13 +1471,13 @@ BEGIN {
     new_block=1
     hunks=0
     address_maps=0
-    err_dev="/dev/stderr"
+    err_device="/dev/stderr"
 
     DIFF = find_util("diff", "DIFFPROG", 1)
     LESS = find_util("less", "PAGER", 1)
     INFOCMP = find_util("infocmp", "INFOCMP", 0)
     getopts(ARGC, ARGV)
-    init_crc()
+    if(crc_active)init_crc()
 
     # Convert binary input to undecorated hexadecimal ASCII.
     # This outputs a line per word, however each line consists of the
@@ -1458,6 +1507,7 @@ BEGIN {
                 if(l<1 || l>3) exit(1)\n                                \
                 word = \"\"tohex[substr($0,1,1)]\n                      \
                 for(i=2;i<=l;i++) word = word\"\"tohex[substr($0,i,1)]\n \
+                for(i;i<=4;i++) word = word\"  \"\n                     \
                 line = \"w\"word\"\"substr(line,1,"match_words_max"*9-9)\n \
                 print line\n                                            \
                 exit(0)\n                                               \
@@ -1475,13 +1525,13 @@ BEGIN {
     while(!ERRNO && (diff_cmd | getline) > 0){
         line = $2
         if ($1=="="){
-            push_old(line)
-            push_new(line)
+            push_old_line(line)
+            push_new_line(line)
             strong_split(old_count, new_count)
         } else if ($1=="<") {
-            push_old(line)
+            push_old_line(line)
         } else if ($1==">") {
-            push_new(line)
+            push_new_line(line)
         }
     }
     diff_eof = 1
