@@ -84,6 +84,145 @@ function gnuify_crc32(crc, bytelength){
 }
 
 #---------------------------------------------------------------------
+#            Basic tty capability querying and attribute usage layer
+#            using ANSI sgr escape codes.  Used to pretty-print output
+#            on the terminal.  It determines the console's formatting
+#            capability, generates escape strings and tracks attributes
+#            currently set.
+#
+#            Side-effects are all self-contained, globals in the tty_
+#            and TTY_ namespaces.  The TTY layer is used by the line
+#            buffering and color layers that follow.
+
+# Helper string function to extract a relevant simple escape code from
+# a terminfo entry.
+function _tkey(source, key,
+                       ret){
+    match(source, key"=\\\\E\\[([0-9]+)", ret)
+    return ret[1]
+}
+
+# Very simple tty escape code capability query using infocmp(1).
+# Determines what formatting capabilities are supported, markes
+# terminal formatting active.
+function fetch_tty_capability() {
+    # fetch terminal info if we can
+    if(INFOCMP){
+        RS="^$"
+        if ((cmd = INFOCMP" -a -0") | getline) {
+            term = $0
+            close(cmd)
+        }
+        RS="\n"
+    }
+    # Global cattribute bitflags
+    TTY_BOLD       = lshift(1,8)
+    TTY_DIM        = lshift(2,8)
+    TTY_ITALIC     = lshift(4,8)
+    TTY_UNDERLINE  = lshift(8,8)
+    TTY_INVERSE    = lshift(16,8)
+    TTY_INVISIBLE  = lshift(32,8)
+    TTY_STRIKEOUT  = lshift(64,8)
+    TTY_COLOR      = 255
+    TTY_NOCOLOR    = 0
+    TTY_RED        = 31
+    TTY_GREEN      = 32
+    if (term ~ /colors/) {
+        tty_active = 1
+        # extract codes that set attributes
+        tty_set_code[TTY_COLOR] = "xx" # hack; replaced on demand later
+        tty_set_code[TTY_BOLD] = _tkey(term,"bold")
+        tty_set_code[TTY_DIM] = _tkey(term,"dim")
+        tty_set_code[TTY_ITALIC] = _tkey(term,"sitm")
+        tty_set_code[TTY_UNDERLINE] = _tkey(term, "smul")
+        tty_set_code[TTY_INVERSE] = _tkey(term,"rev")
+        tty_set_code[TTY_INVISIBLE] = _tkey(term, "invis")
+        if (!(term ~ /eo=/))
+            tty_set_code[TTY_STRIKEOUT] = _tkey(term,"smxx")
+        # extract codes that reset attributes
+        tty_reset_code[TTY_COLOR] = _tkey(term,"op")
+        tty_reset_code[TTY_ITALIC] = _tkey(term, "ritm")
+        tty_reset_code[TTY_UNDERLINE] = _tkey("rmul")
+        if (tty_set_code[TTY_INVERSE] == _tkey(term, "smso"))
+            tty_reset_code[TTY_INVERSE] = _tkey(term, "rmso")
+        if (!(term ~ /eo=/))
+            tty_reset_code[TTY_STRIKEOUT] = _tkey(term,"rmxx")
+        # what set codes do not have corresponding resets (eg,
+        # attributes that require a full attribute reset)?
+        for(attr in tty_set_code){
+            if(tty_set_code[attr] && !tty_reset_code[attr]){
+                # Add to list of attributes with no specific reset.
+                TTY_RESETS = or(TTY_RESETS, attr)
+            }else if (!tty_set_code[attr]){
+                # A reset with no set?  Remove it.
+                tty_reset_code[attr]=""
+            }
+        }
+    }
+}
+
+# Clears terminal formatting capabilities, marks terminal formatting
+# inactive.
+function clear_tty_capability(){
+    tty_active = 0
+    delete tty_set_code
+    delete tty_reset_code
+    TTY_RESETS = 0
+}
+
+# Determine if the passed in formatting attributes are all supported
+# by the terminal.  Takes an or-ed set of TTY_ attribute bitflags.
+function tty_q(attrs){
+    for(attr in tty_set_code){
+        if(and(attrs,attr) && !tty_set_code[attr]) return 0
+    }
+    return 1
+}
+
+# Generates and escape sequence to set the terminal to the requested
+# attribute state based on capability and current state, sets current
+# state to request.  Takes a set of or-ed TTY_ attribute bitflags
+# reflecting desired state.  Safe to call when terminal is inactive
+# (no-op).
+function tty_set(attrs,
+                 ret){
+    if(tty_active){
+        # resetting to default is straightforward
+        if(attrs != tty_current_attributes) {
+            ret = "\033["
+            if(attrs == 0) {
+                ret = ret"m"
+            } else {
+                # hack to set color by code
+                tty_set_code[TTY_COLOR] = ""and(attrs,TTY_COLOR)
+                # can we modify the current attribute set without a full reset?
+                if(and(attrs,and(tty_current_attributes, TTY_RESETS)) != \
+                   and(tty_current_attributes, TTY_RESETS)){
+                    # no.  Issue reset, then further escapes.
+                    ret = ret"0;"
+                    tty_current_attributes = 0
+                }
+                # handle attributes
+                for(key in tty_set_code){
+                    if(and(attrs, key) != and(tty_current_attributes, key)){
+                        if(and(attrs, key)){
+                            if(tty_set_code[key]) ret = ret""tty_set_code[key]";"
+                        } else {
+                            if(tty_reset_code[key]) ret=ret""tty_reset_code[key]";"
+                        }
+                    }
+                }
+                # remove last semicolon
+                gsub(/;$/,"",ret)
+                ret = ret"m"
+            }
+            tty_current_attributes = attrs
+        }
+    }
+    return ret
+}
+
+#---------------------------------------------------------------------
 #            Line-buffered data output layer.  No side effects outside
 #            this layer, though it access variables from the terminal
 #            setup layer.
@@ -92,50 +231,58 @@ function gnuify_crc32(crc, bytelength){
 #                          output_q_lineready
 #                          current_q_attribute
 #
-#            Read-only:    attribute_underline
-#                          attributes_off
-#                          err_device
-#
 #            The line buffer layer queues pieces of a line (or lines
 #            really) to be explicitly flushed.  The goal here is not
-#            performance, but to allow us to go back and alter the
-#            pretty-printing on block boundaries (specifically a block
-#            end/footer), without having to work ahead by arbitrary
-#            amount.  It also tracks the last set ANSI attribute
-#            string set by pretty-printing and does not re-emit if the
-#            same setting is requested again.
+#            performance, but a hack to allow us to go back and alter
+#            the pretty-printing on block boundaries (specifically a
+#            block end/footer) without having to work ahead by
+#            arbitrary amount, or store additional structuredprinting
+#            state.  It also tracks the last set ANSI attribute string
+#            set by pretty-printing and does not re-emit if the same
+#            setting is requested again.
 
 # Accepts a string fragment to add to the queue. Optional argument
 # sets the passed ANSI escape attributes if not already set to the
-# same string.  Omitting the optional argument emits the sequence to
-# disable attributes.
-function q(string, attribute){
+# same flag set.  Omitting the optional argument emits the sequence to
+# disable the currently set attributes.
+function q(string, attrs){
     if (output_q_lineready) q_flush()
-    if (!attribute) attribute = attributes_off
-    if (current_q_attribute != attribute) {
-        output_q_buffer = output_q_buffer""attribute
-        current_q_attribute = attribute
-    }
-    output_q_buffer = output_q_buffer""string
+    output_q_buffer = output_q_buffer""tty_set(attrs)""string
 }
 
-# underlines the text present in the line buffer, assuming
-# terminal supports the operation. Cosmetic pretty-print.
+# Retroactively underlines the text present in the line buffer,
+# assuming terminal supports the underline operation. This is a dirty
+# layer-violating hack that avoids some amount of more complex
+# structured buffer management in higher layers.
 function q_underline(){
-    if(attribute_underline){
-        # quick and dirty; 'm' only occurs in output when in ANSI escapes
-        gsub("m",";4m",output_q_buffer)
-        output_q_buffer = "\033[4m"output_q_buffer
+    if(color_address_underline){
+        # 1) Explicit inline zero reset code; insert underline after it.
+        output_q_buffer = gensub(/(\033\[;*([^0;m];*|[^m;]{2..};*)*)0([;m])+/,
+                                 "\\10;"tty_set_code[TTY_UNDERLINE]"\\3",
+                                 "g",output_q_buffer)
+        # 2) Implicit reset code; replace with explicit reset +
+        # underline.
+        gsub(/\033\[m/,"\033[0;"tty_set_code[TTY_UNDERLINE]"m",
+             output_q_buffer)
+        # 3) Escape sequence at beginning of buffer or line with no
+        # underline.
+        output_q_buffer = gensub("(^|\\n)(\\033\\[;*([^"        \
+                                 tty_set_code[TTY_UNDERLINE]    \
+                                 ";m];*|[^m;]{2..};*)*)m",
+                                 "\\1\\2;"tty_set_code[TTY_UNDERLINE]"m",
+                                 "g",output_q_buffer)
+        # 4) No sequence at beginning of buffer or line.  Add an
+        # underline code.
+        output_q_buffer = gensub(/(^|\n)([^\033])/,
+                                 "\\1\033["tty_set_code[TTY_UNDERLINE]"m\\2",
+                                 "g",output_q_buffer)
     }
 }
 
 function q_line(){
     if (output_q_lineready) q_flush()
-    if (current_q_attribute && current_q_attribute != attributes_off){
-        output_q_buffer = output_q_buffer""attributes_off
-        current_q_attribute = attributes_off
-    }
-    output_q_buffer = output_q_buffer"\n"
+    # set all attributes off; make the pager happy.
+    output_q_buffer = output_q_buffer""tty_set(0)"\n"
     output_q_lineready = 1
 }
 
@@ -150,9 +297,7 @@ function err(string){
     print string > err_device
 }
 
-
-
-
+#-------------------------------------------------------------------
 
 
 # Takes a string of bytes formatted as space-separated hex doubles.
@@ -187,20 +332,20 @@ function bytecount_new_word(new_word,
 # is nonzero if a color change to 'on' should persist for the rest of
 # the string regardless of match; this is used to highlight address
 # differences.
-function out_highlight(to_print, to_compare, off_color, on_color, lock,
+function out_highlight(to_print, to_compare, off, on, lock,
                        current, a, b, c, i){
     if (to_print == " ") {
         to_print = "            "
     }
-    c=off_color
+    c=off
     for(i=1; i<=length(to_print); i++){
         a = substr(to_print,i,1)
         b = substr(to_compare,i,1)
         if(a != " "){
             if (a != b){
-                c = on_color
+                c = on
             } else {
-                if (!lock) c=off_color
+                if (!lock) c = off
             }
         }
         q(a,c)
@@ -232,7 +377,7 @@ function print_address_footer(                                  \
             q(sprintf(" 0x%08x  crc  0x%08x ",
                       gnuify_crc32(block_old_crc,block_old_cursor),
                       gnuify_crc32(block_new_crc,block_new_cursor)),
-              color_address_deemph)
+              color_crc_base)
             q_line()
         }
         # Pretty-print for terminals; add an underline to the last
@@ -241,9 +386,11 @@ function print_address_footer(                                  \
         # Print current addresses for footer.
         old_str = sprintf("0x%08x",block_old_cursor)
         new_str = sprintf("0x%08x",block_new_cursor)
-        out_highlight(" "old_str," "new_str,color_address_base,color_address_diff,1);
-        q(" ----- ",color_bar)
-        out_highlight(new_str" ",old_str" ",color_address_base,color_address_diff,1);
+        out_highlight(" "old_str," "new_str,color_address_base,
+                      color_address_diff,1);
+        q(" ----- ",color_address_bar)
+        out_highlight(new_str" ",old_str" ",color_address_base,
+                      color_address_diff,1);
         q_line()
         # blank line
         q_line()
@@ -256,11 +403,12 @@ function print_address(                                                 \
                        old, new, old_str, new_str, old_map, new_map){
     old_str = sprintf("0x%08x",old_cursor)
     new_str = sprintf("0x%08x",new_cursor)
-    out_highlight(" "old_str," "new_str,color_address_base_underline,
-                  color_address_diff_underline,1);
-    q(" ----- ",color_bar_underline)
-    out_highlight(new_str" ",old_str" ",color_address_base_underline,
-                  color_address_diff_underline,1);
+    out_highlight(" "old_str," "new_str,color_address_base,
+                  color_address_diff,1);
+    q(" ----- ",color_address_bar)
+    out_highlight(new_str" ",old_str" ",color_address_base,
+                  color_address_diff,1);
+    q_underline()
     q_line()
     # If there's an address mapping in effect for this region, indicate it.
     old_map = map_an_address(old_cursor)
@@ -269,11 +417,11 @@ function print_address(                                                 \
         old_str = sprintf("0x%08x",old_map)
         new_str = sprintf("0x%08x",new_map)
 
-        out_highlight(" "old_str," "new_str,color_address_deemph,
-                      color_address_deemph_diff,1);
-        q("  map  ", color_address_deemph)
-        out_highlight(new_str" ",old_str" ",color_address_deemph,
-                      color_address_deemph_diff,1);
+        out_highlight(" "old_str," "new_str,color_map_base,
+                      color_map_diff,1);
+        q("  map  ", color_map_base)
+        out_highlight(new_str" ",old_str" ",color_map_base,
+                      color_map_diff,1);
         q_line()
     }
 }
@@ -285,32 +433,33 @@ function print_address(                                                 \
 function print_diff_line(old_word, new_word,
                      c, ccolor) {
     if(old_word == new_word){
-        q(sprintf(" %s     %s ", old_word, new_word), color_bytes_unchanged)
+        q(sprintf(" %s     %s ", old_word, new_word), color_block_match)
         q_line()
     } else {
         if(ditto_active && old_ditto && old_ditto == old_word){
             out_highlight("     \" \"    "," "new_word,
-                          color_bytes_oldchanged,color_bytes_oldchanged,0)
+                          color_block_oldlight,color_block_oldlight)
         }else{
             out_highlight(" "old_word," "new_word,
-                          attributes_off,color_bytes_oldchanged,0)
+                          color_block_base,color_block_oldlight)
         }
         c = "  !  "
-        ccolor = color_bytes_changed
+        ccolor = color_block_banglight
         if (old_word == "") {
-            ccolor = color_bytes_newchanged
+            ccolor = color_block_newlight
             c = "  >  "
         }
         if (new_word == ""){
-            ccolor = color_bytes_oldchanged
+            ccolor = color_block_oldlight
             c = "  <  "
         }
         q(c,ccolor)
         if(ditto_active && new_ditto && new_ditto == new_word){
             out_highlight("    \" \"     ",old_word" ",
-                          color_bytes_newchanged,color_bytes_newchanged,0);
+                          color_block_newlight,color_block_newlight);
         }else{
-            out_highlight(new_word" ",old_word" ",attributes_off,color_bytes_newchanged,0);
+            out_highlight(new_word" ",old_word" ",
+                          color_block_base,color_block_newlight);
         }
         q_line()
     }
@@ -354,19 +503,22 @@ function discard_all_context(){
 function print_end(){
     print_address_footer()
     discard_all_context()
-    print_address()
-    if(crc_active){
-        q(sprintf(" 0x%08x  crc  0x%08x ",
-                  gnuify_crc32(old_crc, old_cursor),
-                  gnuify_crc32(new_crc, new_cursor)),
-          color_address_deemph)
-        q_underline()
-        q_line()
+    if(block_old_cursor != old_cursor ||
+       block_new_cursor != new_cursor){
+        print_address()
+        if(crc_active){
+            q(sprintf(" 0x%08x  crc  0x%08x ",
+                      gnuify_crc32(old_crc, old_cursor),
+                      gnuify_crc32(new_crc, new_cursor)),
+              color_crc_base)
+            q_underline()
+            q_line()
+        }
     }
     q(" ",color_address_base)
-    q("-----------",color_bar)
+    q("-----------",color_address_midbar)
     q(" END ",color_address_base)
-    q("-----------",color_bar)
+    q("-----------",color_address_midbar)
     q(" ",color_address_base)
     q_line()
     q_line()
@@ -456,7 +608,7 @@ function redact_lines(num_lines,
         # conditionally start a new block output
         print_new_block()
         # output redaction
-        q(" .. .. .. .. <<< ",color_bytes_oldchanged)
+        q(" .. .. .. .. <<< ",color_block_oldlight)
         if(num_lines==1){
             q(left_justify("1 line",12))
         }else{
@@ -482,8 +634,8 @@ function elide_lines(line, num_lines, old_or_new,
         print_new_block()
         # output elided section
         if(old_or_new == "old"){
-            out_highlight(" "word," ",attributes_off,color_bytes_oldchanged,0)
-            q(" <<< ",color_bytes_oldchanged)
+            out_highlight(" "word," ",color_block_base,color_block_oldlight)
+            q(" <<< ",color_block_oldlight)
             if(num_lines==1){
                 q(left_justify("1 line",12))
             }else{
@@ -498,8 +650,8 @@ function elide_lines(line, num_lines, old_or_new,
             }else{
                 q(right_justify(sprintf("%d lines", num_lines),12))
             }
-            q(" >>> ",color_bytes_newchanged)
-            out_highlight(word" "," ",attributes_off,color_bytes_newchanged,0)
+            q(" >>> ",color_block_newlight)
+            out_highlight(word" "," ",color_block_base,color_block_newlight)
             # update CRC and printed byte count, must be done after
             # print_new_block()
             for(i = 0; i < num_lines; i++)
@@ -974,105 +1126,62 @@ function add_map(dst, src, len,
 }
 
 function setup_color() {
-    # fetch terminal info if we can
-    if(INFOCMP){
-        RS="^$"
-        if ((cmd = INFOCMP" -0") | getline) {
-            term = $0
-            close(cmd)
-        }
-        RS="\n"
-    }
-    if (term ~ /colors/) {
-        # is underline available?
-        # is invisible mode available?
-        if (term ~ /smul=/ && term ~ /invis=/) {
-            # Invis means we can hide the '---' separators, so make
-            # things prettier with an underline.
-            attribute_underline = ";4"
-            color_bar = "\033[0;8m"
-            color_bar_underline = "\033[0;8;4m"
-            color_address_base = "\033[0m"
-            color_address_base_underline = "\033[0;4m"
-            # is bold or rev available?
-            if (term ~ /bold=/) {
-                color_address_diff = "\033[0;1m"
-                color_address_diff_underline = "\033[0;1;4m"
-            } else if (term ~ /rev=/) {
-                color_address_diff = "\033[0;7m"
-                color_address_diff_underline = "\033[0;7;4m"
-            } else {
-                color_address_diff = "\033[0m"
-                color_address_diff_underline = "\033[0;4m"
-            }
+    fetch_tty_capability()
+    if(tty_q(TTY_COLOR)){
+        # address header/footer setup
+        if(tty_q( TTY_UNDERLINE + TTY_INVISIBLE)){
+            # can pretty-print the header/footer bars
+            color_address_underline = TTY_UNDERLINE
+            color_address_base = TTY_NOCOLOR
+            color_address_bar = TTY_INVISIBLE
+            color_address_midbar = TTY_INVISIBLE + TTY_STRIKEOUT
+            color_address_diff = TTY_BOLD
+        }else if (tty_q( TTY_STRIKEOUT + TTY_INVISIBLE )){
+            # can't pretty-print underline, try strikeouts
+            color_address_underline = TTY_NOCOLOR
+            color_address_base = TTY_NOCOLOR
+            color_address_bar = TTY_INVISIBLE + TTY_STRIKEOUT
+            color_address_midbar = TTY_INVISIBLE + TTY_STRIKEOUT
+            color_address_diff = TTY_BOLD
         }else{
-            # can't hide the ---, so don't use underlines.
-            attribute_underline = ""
-            color_bar = "\033[0m"
-            color_bar_underline = "\033[0m"
-            color_address_base = "\033[0m"
-            color_address_base_underline = "\033[0m"
-            # is bold or rev available?
-            if (term ~ /bold=/) {
-                color_address_diff = "\033[0;1m"
-                color_address_diff_underline = "\033[0;1m"
-            } else if (term ~ /rev=/) {
-                color_address_diff = "\033[0;7m"
-                color_address_diff_underline = "\033[0;7m"
-            } else {
-                color_address_diff = "\033[0m"
-                color_address_diff_underline = "\033[0m"
-            }
+            # can't pretty-print at all, lean into emdash
+            color_address_underline = TTY_NOCOLOR
+            color_address_base = TTY_NOCOLOR
+            color_address_bar = TTY_NOCOLOR
+            color_address_midbar = TTY_NOCOLOR
+            color_address_diff = TTY_BOLD
         }
-        # is dim available?
-        if (term ~ /dim=/) {
-            color_address_deemph = "\033[0;2m"
-            # is bold available?
-            if (term ~ /bold=/) {
-                color_address_deemph_diff = "\033[0;1;2m"
-            }else{
-                color_address_deemph_diff = "\033[0m"
-            }
-            color_bytes_unchanged = "\033[0;2m"
-        }else{
-            color_address_deemph = "\033[0m"
-            # is bold available?
-            if (term ~ /bold=/) {
-                color_address_deemph_diff = "\033[0;1m"
-            }else{
-                color_address_deemph_diff = "\033[0m"
-            }
-            color_bytes_unchanged = "\033[0m"
-        }
-        # can we bold bright color changes?
-        if (term ~ /bold=/) {
-            color_bytes_oldchanged = "\033[0;31;1m"
-            color_bytes_newchanged = "\033[0;32;1m"
-            color_bytes_changed = "\033[0;1m"
-        }else{
-            color_bytes_oldchanged = "\033[0;31m"
-            color_bytes_newchanged = "\033[0;32m"
-            color_bytes_changed = "\033[0m"
-        }
-        attributes_off = "\033[0m"
+
+        # diff line entries
+        color_block_base = TTY_NOCOLOR
+        color_block_match = TTY_DIM
+        color_block_oldlight = TTY_RED + TTY_BOLD
+        color_block_newlight = TTY_GREEN + TTY_BOLD
+        color_block_banglight = TTY_BOLD
+
+        # map line entries
+        color_map_base = TTY_DIM
+        color_map_diff = TTY_DIM + TTY_BOLD
+
+        # crc line entries
+        color_crc_base = TTY_DIM
     }
 }
 
 function disable_color(){
-    color_address_base=""
-    color_address_base_underline=""
-    color_address_diff=""
-    color_address_diff_underline=""
-    color_address_deemph=""
-    color_address_deemph_diff=""
-    color_bytes_unchanged=""
-    color_bytes_oldchanged=""
-    color_bytes_newchanged=""
-    color_bytes_changed=""
-    color_bar=""
-    color_bar_underline=""
-    attribute_underline = ""
-    attributes_off=""
+    clear_tty_capability()
+    color_address_base = 0
+    color_address_underline = 0
+    color_address_bar = 0
+    color_address_midbar = 0
+    color_address_diff = 0
+    color_block_base = 0
+    color_block_oldlight = 0
+    color_block_newlight = 0
+    color_block_banglight = 0
+    color_map_base = 0
+    color_map_diff = 0
+    color_crc_base = 0
 }
 
 function stdout_usage(\
